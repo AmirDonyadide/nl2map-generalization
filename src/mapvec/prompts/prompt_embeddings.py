@@ -1,0 +1,376 @@
+# prompt_embeddings.py
+# Embed prompts (CSV/TXT) with USE-DAN/Transformer and save artifacts.
+# Default I/O lives under the project ./data folder (at repo root, not inside src/).
+
+from __future__ import annotations
+import os
+import sys
+import time
+import json
+import argparse
+import logging
+from typing import Tuple, List, Optional
+from pathlib import Path
+import shutil
+
+import numpy as np
+import pandas as pd
+import tensorflow_hub as hub
+
+# ----------------------- project/data discovery -----------------------
+def find_project_root(start: Path) -> Path:
+    """
+    Walk up from `start` to find a directory that looks like the project root:
+    prefers a directory that contains 'data' or '.git', or the parent of 'src'.
+    """
+    cur = start.resolve()
+    for p in [cur, *cur.parents]:
+        if (p / "data").is_dir() or (p / ".git").is_dir():
+            return p
+        if p.name == "src":
+            return p.parent
+    # fallback to top-level parent
+    return cur.parents[-1] if len(cur.parents) else cur
+
+FILE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = find_project_root(FILE_DIR)
+
+def get_default_data_dir() -> Path:
+    env = os.environ.get("MAPVEC_DATA_DIR")
+    if env and env.strip():
+        return Path(env).expanduser().resolve()
+    return (PROJECT_ROOT / "data").resolve()
+
+DEFAULT_DATA_DIR = get_default_data_dir()
+
+# ----------------------- logging -----------------------
+def setup_logging(verbosity: int = 1):
+    level = logging.WARNING if verbosity <= 0 else (logging.INFO if verbosity == 1 else logging.DEBUG)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logging.debug("FILE_DIR=%s", FILE_DIR)
+    logging.debug("PROJECT_ROOT=%s", PROJECT_ROOT)
+    logging.debug("DEFAULT_DATA_DIR=%s", DEFAULT_DATA_DIR)
+
+# ----------------------- Model discovery & loader -----------------------
+# Kaggle Models IDs for TF2 variants (public, same models TF-Hub points to)
+_KAGGLE_MODEL_IDS = {
+    "dan": "google/universal-sentence-encoder/tensorFlow2/universal-sentence-encoder/2",
+    "transformer": "google/universal-sentence-encoder-large/tensorFlow2/universal-sentence-encoder-large/2",
+}
+
+def _default_model_dir(data_dir: Path, which: str) -> Path:
+    # Stable local folders; also check legacy 'model' folder as a fallback
+    if which == "dan":
+        return (data_dir / "input" / "model_dan").resolve()
+    else:
+        return (data_dir / "input" / "model_transformer").resolve()
+
+def _has_saved_model(folder: Path) -> bool:
+    return (folder / "saved_model.pb").exists() and (folder / "variables").exists()
+
+def _copy_into(dst: Path, src: Path):
+    dst.mkdir(parents=True, exist_ok=True)
+    # If the Kaggle download gives a folder that already contains saved_model.pb,
+    # just copy its content into dst.
+    for item in src.iterdir():
+        target = dst / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, target)
+
+def _download_with_kagglehub(which: str) -> Optional[Path]:
+    """
+    Downloads the model via kagglehub and returns the local path to the SavedModel.
+    Returns None on failure.
+    """
+    try:
+        import kagglehub  # pip install kagglehub
+    except Exception:
+        logging.error("kagglehub is not installed. Install it with: pip install kagglehub")
+        return None
+
+    model_id = _KAGGLE_MODEL_IDS[which]
+    logging.info("Downloading USE-%s via kagglehub (%s)…", which, model_id)
+    try:
+        local_path = Path(kagglehub.model_download(model_id)).resolve()
+        # The returned path is a folder that should contain saved_model.pb
+        if _has_saved_model(local_path):
+            logging.info("Downloaded to %s", local_path)
+            return local_path
+        # Some packages place the SavedModel one level deeper; scan one level
+        for sub in local_path.iterdir():
+            if sub.is_dir() and _has_saved_model(sub):
+                logging.info("Found SavedModel inside %s", sub)
+                return sub.resolve()
+        logging.error("Downloaded content does not look like a TF SavedModel at %s", local_path)
+        return None
+    except Exception as e:
+        logging.exception("Download failed: %s", e)
+        return None
+
+def ensure_local_use_model(which: str, dest_dir: Path) -> Path:
+    """
+    Ensure the USE model is present locally under dest_dir.
+    - If present, return dest_dir.
+    - If missing, try to download via kagglehub and copy there.
+    """
+    which = which.lower()
+    if which not in ("dan", "transformer"):
+        raise ValueError("Unknown model. Choose 'dan' or 'transformer'.")
+
+    # 1) Already present?
+    if _has_saved_model(dest_dir):
+        logging.info("Using local USE-%s at %s", which, dest_dir)
+        return dest_dir
+
+    # 2) Attempt to download
+    logging.info("Local model not found at %s. Attempting download…", dest_dir)
+    dl_path = _download_with_kagglehub(which)
+    if dl_path is None:
+        # Give a clear, actionable message
+        raise RuntimeError(
+            "Could not download the model automatically.\n"
+            "Options:\n"
+            f"  A) Install kagglehub and try again:  pip install kagglehub\n"
+            f"  B) Manually place the unpacked SavedModel under: {dest_dir}\n"
+            "     The folder must contain: saved_model.pb, variables/, assets/ (assets optional)."
+        )
+
+    # 3) Copy downloaded SavedModel into our canonical dest_dir
+    _copy_into(dest_dir, dl_path)
+    if not _has_saved_model(dest_dir):
+        raise RuntimeError(f"Model copy failed; SavedModel not found under {dest_dir}")
+
+    logging.info("Model ready at %s", dest_dir)
+    return dest_dir
+
+def load_use_local_or_download(which: str, data_dir: Path):
+    """
+    Resolves a local path for the model (data/input/model_*) and loads it with hub.load.
+    If missing, downloads via kagglehub, installs it into that path, and loads.
+    """
+    dest_dir = _default_model_dir(data_dir, which)
+    ready_dir = ensure_local_use_model(which, dest_dir)
+    t0 = time.time()
+    logging.info("Loading USE-%s from local path: %s …", which, ready_dir)
+    model = hub.load(str(ready_dir))
+    logging.info("Model loaded in %.2fs", time.time() - t0)
+    return model
+
+# ----------------------- Embedding helpers -----------------------
+def _sanitize_texts(texts: List[str]) -> List[str]:
+    cleaned = []
+    for i, t in enumerate(texts):
+        if t is None:
+            raise ValueError(f"Row {i}: text is None")
+        s = str(t).strip()
+        if not s:
+            raise ValueError(f"Row {i}: text is empty after stripping")
+        cleaned.append(s)
+    return cleaned
+
+def embed_texts(model, texts: List[str], l2_normalize: bool = True, batch_size: int = 512) -> np.ndarray:
+    """Embeds a list of strings with optional batching. Returns (N, D) float32."""
+    texts = _sanitize_texts(texts)
+    n = len(texts)
+    if n == 0:
+        raise ValueError("No prompts to embed (after cleaning).")
+
+    logging.info("Embedding %d prompts (batch_size=%d, l2=%s)…", n, batch_size, l2_normalize)
+    t0 = time.time()
+
+    probe = model([texts[0]]).numpy().astype(np.float32)
+    dim = probe.shape[1]
+    E = np.empty((n, dim), dtype=np.float32)
+    E[0] = probe[0]
+
+    start = 1
+    while start < n:
+        end = min(start + batch_size, n)
+        batch = texts[start:end]
+        E[start:end] = model(batch).numpy().astype(np.float32)
+        logging.debug("  embedded rows [%d:%d)", start, end)
+        start = end
+
+    if l2_normalize:
+        E /= (np.linalg.norm(E, axis=1, keepdims=True) + 1e-12)
+
+    logging.info("Done embedding in %.2fs (dim=%d).", time.time() - t0, dim)
+    return E
+
+# ----------------------- I/O helpers -----------------------
+def load_prompts_from_source(input_path: Path) -> Tuple[List[str], List[str], str]:
+    """
+    Returns (ids, texts, id_colname)
+      - .txt → ids are p000, p001, ...
+      - .csv → supports columns (prompt_id,text) or (id,text)
+    """
+    if not input_path or not input_path.exists():
+        raise FileNotFoundError(
+            f"Missing or invalid --input path: {input_path}. "
+            "Provide a .csv (prompt_id,text) or .txt (one per line)."
+        )
+
+    ext = input_path.suffix.lower()
+    if ext == ".txt":
+        logging.info("Reading TXT: %s", input_path)
+        texts = [ln.strip() for ln in input_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if len(texts) == 0:
+            raise ValueError("TXT contains no non-empty lines.")
+        ids = [f"p{i:03d}" for i in range(len(texts))]
+        return ids, texts, "prompt_id"
+
+    if ext == ".csv":
+        logging.info("Reading CSV: %s", input_path)
+        df = pd.read_csv(input_path)
+        if {"prompt_id", "text"}.issubset(df.columns):
+            id_col = "prompt_id"
+        elif {"id", "text"}.issubset(df.columns):
+            id_col = "id"
+        else:
+            raise ValueError("CSV must contain columns (prompt_id,text) or (id,text).")
+
+        df = df[[id_col, "text"]].copy()
+        df[id_col] = df[id_col].astype(str).str.strip()
+        df["text"] = df["text"].astype(str)
+
+        before = len(df)
+        df = df[(df[id_col] != "") & df["text"].str.strip().ne("")]
+        after = len(df)
+        if after == 0:
+            raise ValueError("CSV has no valid rows (non-empty id/text) after cleaning.")
+        if after < before:
+            logging.warning("Dropped %d invalid/empty rows from CSV.", before - after)
+
+        if df[id_col].duplicated().any():
+            dupes = df[df[id_col].duplicated()][id_col].tolist()
+            firsts = ", ".join(map(str, dupes[:5]))
+            raise ValueError(f"Duplicate prompt IDs detected: {firsts}{'…' if len(dupes) > 5 else ''}")
+
+        return df[id_col].tolist(), df["text"].tolist(), id_col
+
+    raise ValueError("Unsupported input type. Use .csv or .txt.")
+
+def save_outputs(
+    out_dir: Path,
+    ids: List[str],
+    texts: List[str],
+    E: np.ndarray,
+    model_name: str,
+    l2_normalized: bool,
+    id_colname: str = "prompt_id",
+    also_save_embeddings_csv: bool = False,
+):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logging.info("Writing outputs to %s", out_dir)
+
+    npz_path = out_dir / "embeddings.npz"
+    np.savez_compressed(npz_path, E=E, ids=np.array(ids, dtype=object))
+    logging.info("  saved %s (shape=%s)", npz_path.name, tuple(E.shape))
+
+    pq_path = out_dir / "prompts.parquet"
+    pd.DataFrame({id_colname: ids, "text": texts}).to_parquet(pq_path, index=False)
+    logging.info("  saved %s (rows=%d)", pq_path.name, len(ids))
+
+    csv_name = None
+    if also_save_embeddings_csv:
+        D = E.shape[1]
+        cols = [f"e{i:04d}" for i in range(D)]
+        dfw = pd.DataFrame(E, columns=cols)
+        dfw.insert(0, id_colname, ids)
+        csv_path = out_dir / "embeddings.csv"
+        dfw.to_csv(csv_path, index=False)
+        logging.info("  saved %s", csv_path.name)
+        csv_name = csv_path.name
+
+    meta = {
+        "model": f"USE-{model_name}",
+        "dim": int(E.shape[1]),
+        "count": int(E.shape[0]),
+        "l2_normalized": bool(l2_normalized),
+        "id_colname": id_colname,
+        "files": {
+            "embeddings_npz": npz_path.name,
+            "prompts_parquet": pq_path.name,
+            "embeddings_csv": csv_name,
+        },
+    }
+    meta_path = out_dir / "meta.json"
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    logging.info("  saved %s", meta_path.name)
+
+
+# ----------------------- CLI -----------------------
+def main():
+    parser = argparse.ArgumentParser(description="Embed prompts with USE and save artifacts.")
+    parser.add_argument("--input", type=str,
+                        default=None,
+                        help="Path to .txt (one per line) or .csv with columns prompt_id,text (or id,text). "
+                             "Default: <data_dir>/prompts.csv")
+    parser.add_argument("--data_dir", type=str,
+                        default=str(DEFAULT_DATA_DIR),
+                        help="Directory that holds inputs/outputs (default: auto-detected project data dir). "
+                             "Env override: MAPVEC_DATA_DIR")
+    parser.add_argument("--model", type=str, default="dan", choices=["dan", "transformer"],
+                        help="USE variant.")
+    parser.add_argument("--l2", action="store_true",
+                        help="L2-normalize embeddings (recommended).")
+    parser.add_argument("--out_dir", type=str,
+                        default=None,
+                        help="Output directory (default: <data_dir>/prompt_out).")
+    parser.add_argument("--embeddings_csv", action="store_true",
+                        help="Also save a wide embeddings.csv with columns prompt_id,e0000..eXXXX.")
+    parser.add_argument("--batch_size", type=int, default=512,
+                        help="Batch size for embedding calls.")
+    parser.add_argument("-v", "--verbose", action="count", default=1,
+                        help="Increase verbosity (-v, -vv).")
+    args = parser.parse_args()
+
+    setup_logging(args.verbose)
+
+    data_dir = Path(args.data_dir).resolve()
+    in_path = Path(args.input).expanduser().resolve() if args.input else (data_dir / "input" / "prompts.csv")
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else (data_dir / "output" / "prompt_out")
+
+    logging.info("DATA_DIR=%s", data_dir)
+    logging.info("INPUT=%s", in_path)
+    logging.info("OUT_DIR=%s", out_dir)
+
+    if not in_path.exists():
+        logging.error("Input not found: %s", in_path)
+        logging.error("Tips: run with --data_dir <your-repo>/data  or set MAPVEC_DATA_DIR")
+        sys.exit(2)
+
+    try:
+        ids, texts, id_colname = load_prompts_from_source(in_path)
+        logging.info("Loaded %d prompts (id_col=%s). Sample IDs: %s",
+                     len(ids), id_colname, ", ".join(ids[:3]) + ("…" if len(ids) > 3 else ""))
+
+        # NEW: local-first, download-if-missing
+        model = load_use_local_or_download(args.model, data_dir)
+
+        E = embed_texts(model, texts, l2_normalize=args.l2, batch_size=args.batch_size)
+
+        save_outputs(
+            out_dir=out_dir,
+            ids=ids,
+            texts=texts,
+            E=E,
+            model_name=args.model,
+            l2_normalized=args.l2,
+            id_colname=id_colname if id_colname in ("prompt_id", "id") else "prompt_id",
+            also_save_embeddings_csv=args.embeddings_csv,
+        )
+
+        logging.info("All done ✅")
+    except Exception as e:
+        logging.exception("Failed: %s", e)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
