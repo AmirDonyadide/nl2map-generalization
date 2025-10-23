@@ -36,6 +36,65 @@ from shapely.prepared import prep
 # If you prefer no external deps, remove sklearn and use _zscore/_minmax below.
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
+
+# --- numeric stabilizer for per-polygon features (stateless; no leakage) ---
+def _stabilize_polygon_feats(feats: dict, bbox) -> dict:
+    """
+    Normalize length/area/distance features by the map scale, then log1p heavy-tailed positives.
+    Keeps the SAME feature keys so downstream 249-D schema is unchanged.
+    """
+    minx, miny, maxx, maxy = bbox
+    bw = max(maxx - minx, 1e-12)
+    bh = max(maxy - miny, 1e-12)
+    bbox_area = bw * bh
+    diag = (bw * bw + bh * bh) ** 0.5
+
+    # ---- 1) Normalize to remove units ------------------------------
+    # lengths / distances -> divide by diag
+    _by_diag = [
+        "perimeter",
+        "mean_neighbor_distance_touches", "mean_neighbor_distance_intersects",
+        "eq_diameter",
+        "nn_dist_min", "nn_dist_median", "nn_dist_max",
+        "knn1", "knn2", "knn3",
+        "bbox_width", "bbox_height",
+    ]
+    for k in _by_diag:
+        if k in feats and np.isfinite(feats[k]):
+            feats[k] = float(feats[k]) / diag
+
+    # areas -> divide by bbox area (extent already exists as area/bbox_area)
+    if "area" in feats and np.isfinite(feats["area"]):
+        feats["area"] = float(feats["area"]) / bbox_area
+
+    # centroid_x / centroid_y are already bbox-normalized upstream; leave as-is.
+    # ratios (compactness, circularity, rectangularity, extent, convexity, straightness,
+    # bbox_aspect, eccentricity, hole_area_ratio, reflex_ratio) are unitless; leave as-is.
+
+    # ---- 2) log1p heavy-tailed positives (after normalization) ----
+    _log_keys = {
+        "area", "perimeter", "vertex_count",
+        "neighbor_count_touches", "neighbor_count_intersects",
+        "mean_neighbor_distance_touches", "mean_neighbor_distance_intersects",
+        "bbox_width", "bbox_height", "eq_diameter",
+        "hole_count",
+        "nn_dist_min", "nn_dist_median", "nn_dist_max",
+        "knn1", "knn2", "knn3",
+        "density_r05", "density_r10",
+        "reflex_count",
+    }
+    for k in _log_keys:
+        if k in feats:
+            v = feats[k]
+            if v is not None and np.isfinite(v) and v >= 0:
+                feats[k] = float(np.log1p(v))
+            elif v is None or not np.isfinite(v):
+                feats[k] = 0.0  # make it finite
+
+    # Keep 'orientation' as degrees to preserve 249-D list (circularity handled downstream by scaler)
+    return feats
+
+
 GeometryLike = Union[Polygon, MultiPolygon]
 
 # ---------- warning suppressor used around GEOS calls ----------
@@ -206,7 +265,7 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
     angle_std = (sum((v - (sum(angles)/max(len(angles),1)))**2 for v in angles)/max(len(angles),1))**0.5 if angles else 0.0
     reflex_ratio = reflex / max(n, 1)
 
-    return {
+    feats = {
         "area": area,
         "perimeter": perimeter,
         "vertex_count": vcount,
@@ -231,6 +290,10 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         "reflex_count": reflex,
         "reflex_ratio": reflex_ratio,
     }
+    # IMPORTANT: stabilize values with map bbox (no dataset stats involved)
+    feats = _stabilize_polygon_feats(feats, bbox=bbox)
+    return feats
+
 
 # ---- CRS helpers (use only if your inputs are in degrees) ----
 

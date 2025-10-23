@@ -64,6 +64,7 @@ def pool_map_embedding(
     # --- optional global scalars ---
     if add_globals:
         N = float(len(df_polys))
+        N_log = float(np.log1p(N))  # stabilize counts  (name kept as 'poly_count')
         # Only compute bbox if centroid columns are present; otherwise fallback to zeros
         if {"centroid_x", "centroid_y"}.issubset(df_polys.columns):
             cx = pd.to_numeric(df_polys["centroid_x"], errors="coerce")
@@ -84,7 +85,7 @@ def pool_map_embedding(
             bbox_h = 0.0
             bbox_aspect = 0.0
 
-        parts.append(np.array([N, bbox_w, bbox_h, bbox_aspect], dtype=float))
+        parts.append(np.array([N_log, bbox_w, bbox_h, bbox_aspect], dtype=float))
         names += ["poly_count", "map_bbox_w", "map_bbox_h", "map_bbox_aspect"]
 
     # --- finalize ---
