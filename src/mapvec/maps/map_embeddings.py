@@ -205,9 +205,9 @@ def save_outputs(
 
     # 1) embeddings (npz)
     try:
-        np.savez_compressed(out_dir / "embeddings.npz", E=E.astype(np.float32, copy=False), ids=np.array(ids, dtype=object))
+        np.savez_compressed(out_dir / "maps_embeddings.npz", E=E.astype(np.float32, copy=False), ids=np.array(ids, dtype=object))
     except Exception as e:
-        logging.error("Failed to save embeddings.npz: %s", e)
+        logging.error("Failed to save maps_embeddings.npz: %s", e)
         raise
 
     # 2) table of maps (light metadata)
@@ -224,7 +224,7 @@ def save_outputs(
         "dim": int(E.shape[1]),
         "count": int(E.shape[0]),
         "files": {
-            "embeddings_npz": "embeddings.npz",
+            "maps_embeddings_npz": "maps_embeddings.npz",
             "maps_parquet": "maps.parquet",  # may have CSV fallback
         },
         "vector_schema": "pooled stats over per-polygon features",

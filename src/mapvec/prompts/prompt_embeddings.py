@@ -269,7 +269,7 @@ def save_outputs(
     out_dir.mkdir(parents=True, exist_ok=True)
     logging.info("Writing outputs to %s", out_dir)
 
-    npz_path = out_dir / "embeddings.npz"
+    npz_path = out_dir / "prompts_embeddings.npz"
     np.savez_compressed(npz_path, E=E, ids=np.array(ids, dtype=object))
     logging.info("  saved %s (shape=%s)", npz_path.name, tuple(E.shape))
 

@@ -1,4 +1,4 @@
-# src/mapvec/concat/build_training_matrix.py
+# src/mapvec/concat/concat_embeddings.py
 # Join pair-map + prompt embeddings using pairs.csv and export:
 #  - X_concat.npy  (row-wise [map_vec | prompt_vec])
 #  - train_pairs.parquet (joined rows with original pair metadata)
@@ -40,10 +40,10 @@ def load_npz(npz_path: Path) -> Tuple[np.ndarray, List[str]]:
 
 def main():
     ap = argparse.ArgumentParser(description="Concatenate pair-map & prompt embeddings via pairs.csv.")
-    ap.add_argument("--pairs",       type=str, default=str(DATA_DIR / "pairs.csv"))
-    ap.add_argument("--map_npz",     type=str, default=str(DATA_DIR / "pair_map_out" / "embeddings.npz"))
-    ap.add_argument("--prompt_npz",  type=str, default=str(DATA_DIR / "prompt_out"   / "embeddings.npz"))
-    ap.add_argument("--out_dir",     type=str, default=str(DATA_DIR / "train_out"))
+    ap.add_argument("--pairs",       type=str, default=str(DATA_DIR / "input"  / "pairs.csv"))
+    ap.add_argument("--map_npz",     type=str, default=str(DATA_DIR / "output" / "map_out" / "maps_embeddings.npz"))
+    ap.add_argument("--prompt_npz",  type=str, default=str(DATA_DIR / "output" / "prompt_out"   / "prompts_embeddings.npz"))
+    ap.add_argument("--out_dir",     type=str, default=str(DATA_DIR / "output" / "train_out"))
     ap.add_argument("--fail_on_missing", action="store_true")
     ap.add_argument("--drop_dupes",      action="store_true")
     ap.add_argument("-v", "--verbose",   action="count", default=1)
