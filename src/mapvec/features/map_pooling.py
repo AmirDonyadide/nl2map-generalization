@@ -11,10 +11,12 @@ def pool_map_embedding(
     """
     Turn a per-polygon feature table into one fixed-length map embedding.
 
-    Returns
-    -------
-    vec : np.ndarray  shape (D,)
-    names : list[str] feature names aligned with vec
+    Notes
+    -----
+    - With the new polygon_features, centroid_x/centroid_y are already
+      bbox-normalized to [0,1] within each map. The global 'spread' values
+      below reflect the fraction of the map's extent actually used by the
+      polygons, not absolute sizes.
     """
     # --- guards & numeric-only view ---
     if df_polys is None or len(df_polys) == 0:
@@ -43,8 +45,8 @@ def pool_map_embedding(
         parts.append(np.nanmean(F, axis=0))
         names += [f"{c}__mean" for c in feat_cols]
     if "std" in stats:
-        # population std to mirror your original ddof=0
-        parts.append(np.nanstd(F, axis=0))
+        parts.append(np.nanstd(F, axis=0))  
+        # population std (ddof=0) to match feature computation
         names += [f"{c}__std" for c in feat_cols]
     if "min" in stats:
         parts.append(np.nanmin(F, axis=0))
@@ -53,10 +55,13 @@ def pool_map_embedding(
         parts.append(np.nanmax(F, axis=0))
         names += [f"{c}__max" for c in feat_cols]
 
-    # --- quantiles (nan-safe) ---
+    # --- quantiles (nan-safe) with NumPy version fallback ---
     if quantiles and F.size:
         q = np.array(list(quantiles), dtype=float)
-        Q = np.nanquantile(F, q=q, axis=0, method="linear")  # shape: (len(q), d)
+        try:
+            Q = np.nanquantile(F, q=q, axis=0, method="linear")  # NumPy ≥ 1.22
+        except TypeError:
+            Q = np.nanquantile(F, q=q, axis=0, interpolation="linear")  # older NumPy #type: ignore
         for qq, row in zip(quantiles, Q):
             parts.append(row)
             names += [f"{c}__q{int(round(qq*100))}" for c in feat_cols]
@@ -64,36 +69,32 @@ def pool_map_embedding(
     # --- optional global scalars ---
     if add_globals:
         N = float(len(df_polys))
-        N_log = float(np.log1p(N))  # stabilize counts  (name kept as 'poly_count')
-        # Only compute bbox if centroid columns are present; otherwise fallback to zeros
+        N_log = float(np.log1p(N))  # stabilized polygon count
+
+        # centroid-based spread in normalized space (0..1)
         if {"centroid_x", "centroid_y"}.issubset(df_polys.columns):
-            cx = pd.to_numeric(df_polys["centroid_x"], errors="coerce")
-            cy = pd.to_numeric(df_polys["centroid_y"], errors="coerce")
-            cx = cx.replace([np.inf, -np.inf], np.nan)
-            cy = cy.replace([np.inf, -np.inf], np.nan)
+            cx = pd.to_numeric(df_polys["centroid_x"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            cy = pd.to_numeric(df_polys["centroid_y"], errors="coerce").replace([np.inf, -np.inf], np.nan)
 
-            minx = float(np.nanmin(cx)) if cx.notna().any() else 0.0
-            miny = float(np.nanmin(cy)) if cy.notna().any() else 0.0
-            maxx = float(np.nanmax(cx)) if cx.notna().any() else 0.0
-            maxy = float(np.nanmax(cy)) if cy.notna().any() else 0.0
-
-            bbox_w = max(maxx - minx, 1e-12)
-            bbox_h = max(maxy - miny, 1e-12)
-            bbox_aspect = bbox_w / bbox_h
+            if cx.notna().any() and cy.notna().any():
+                minx = float(np.nanmin(cx)); maxx = float(np.nanmax(cx))
+                miny = float(np.nanmin(cy)); maxy = float(np.nanmax(cy))
+                spread_w = max(maxx - minx, 0.0)          # fraction in [0,1]
+                spread_h = max(maxy - miny, 0.0)          # fraction in [0,1]
+                spread_aspect = (spread_w / max(spread_h, 1e-12)) if spread_h > 0 else 0.0
+            else:
+                spread_w = spread_h = spread_aspect = 0.0
         else:
-            bbox_w = 0.0
-            bbox_h = 0.0
-            bbox_aspect = 0.0
-
-        parts.append(np.array([N_log, bbox_w, bbox_h, bbox_aspect], dtype=float))
-        names += ["poly_count", "map_bbox_w", "map_bbox_h", "map_bbox_aspect"]
+            spread_w = spread_h = spread_aspect = 0.0
+            
+        spread_aspect = np.log1p(spread_aspect)
+        parts.append(np.array([N_log, spread_w, spread_h, spread_aspect], dtype=float))
+        names += ["poly_count", "poly_spread_w", "poly_spread_h", "poly_spread_aspect"]
 
     # --- finalize ---
     if parts:
         vec = np.concatenate(parts, axis=0)
-        # replace remaining NaNs (if any all-NaN columns were present)
-        if np.isnan(vec).any():
-            vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
+        vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
     else:
         vec = np.zeros(0, dtype=float)
 

@@ -12,8 +12,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 
-from shapely.geometry import Polygon, MultiPolygon, base, GeometryCollection
-from shapely.ops import unary_union
+from shapely.geometry import Polygon, MultiPolygon, GeometryCollection
 
 # ↳ local modules (unchanged import paths)
 from src.mapvec.features.polygon_features import embed_polygons_handcrafted
@@ -64,7 +63,10 @@ def find_geojsons(root: Path, pattern: str) -> Iterator[Tuple[str, Path]]:
 def _read_geo(gj_path: Path) -> gpd.GeoDataFrame:
     """Read a vector file robustly; filter empties/nulls."""
     # gpd.read_file handles many formats (GeoJSON, GPKG, Shapefile, etc.)
-    gdf = gpd.read_file(gj_path)
+    gdf = gpd.read_file(gj_path) 
+    # If CRS missing, assume WGS84 (typical for GeoJSON) so we can safely project later
+    if gdf.crs is None:
+        gdf = gdf.set_crs(4326)
     if gdf.empty:
         raise ValueError("GeoDataFrame is empty.")
     if "geometry" not in gdf.columns:
@@ -134,7 +136,7 @@ def embed_one_map(gj_path: Path) -> Tuple[np.ndarray, List[str]]:
 
     # Optional but recommended: project to a metric CRS before area/perimeter stats
     try:
-        if gdf.crs and gdf.crs.is_geographic:
+        if gdf.crs and getattr(gdf.crs, "is_geographic", False):
             gdf = gdf.to_crs(3857)  # Web Mercator: meters
     except Exception:
         pass  # keep original CRS if reprojection fails
@@ -144,9 +146,7 @@ def embed_one_map(gj_path: Path) -> Tuple[np.ndarray, List[str]]:
     if len(geoms) == 0:
         raise ValueError("No valid polygon parts after flatten/clean (all invalid/empty?).")
 
-    df_polys = embed_polygons_handcrafted(geoms, normalize=False)
-    if isinstance(df_polys, tuple):
-        df_polys = df_polys[0]
+    df_polys = embed_polygons_handcrafted(geoms)
     if df_polys is None or df_polys.empty:
         raise ValueError("Feature table is empty after extraction.")
 

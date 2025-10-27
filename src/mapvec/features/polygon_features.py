@@ -1,25 +1,16 @@
 """
-polygon_embeddings.py
+polygon_features.py
 Hand-crafted polygon feature extraction (vector embeddings) using Shapely + Pandas.
 
-Usage (CLI):
-    python polygon_embeddings.py input.geojson output.csv [normalize] [--utm]
-
-    normalize:
-        none    (default)
-        zscore  (mean=0, std=1)
-        minmax  ([0,1] per column)
-
 As a module:
-    from polygon_embeddings import embed_polygons_handcrafted
+    from polygon_features import embed_polygons_handcrafted
+    df = embed_polygons_handcrafted(list_of_polygons_or_multipolygons)
 """
 
 from __future__ import annotations
 
 import math
-import sys
-from numbers import Integral
-from typing import Iterable, List, Tuple, Union, Optional
+from typing import Iterable, List, Tuple, Union
 from contextlib import contextmanager
 import warnings
 
@@ -28,20 +19,56 @@ import pandas as pd
 
 from shapely.geometry import Polygon, MultiPolygon
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import transform
 from shapely.strtree import STRtree
 from shapely.errors import TopologicalError
 from shapely.prepared import prep
 
-# If you prefer no external deps, remove sklearn and use _zscore/_minmax below.
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+GeometryLike = Union[Polygon, MultiPolygon]
 
+# Stable feature order for output columns (id is added separately)
+_NUMERIC_ORDER = [
+    "area",
+    "perimeter",
+    "vertex_count",
+    "centroid_x",
+    "centroid_y",
+    "compactness",
+    "circularity",
+    "elongation",
+    "convexity",
+    "rectangularity",
+    "straightness",
+    "neighbor_count_touches",
+    "mean_neighbor_distance_touches",
+    "neighbor_count_intersects",
+    "mean_neighbor_distance_intersects",
+    "bbox_width",
+    "bbox_height",
+    "bbox_aspect",
+    "extent",
+    "orient_sin",
+    "orient_cos",
+    "eq_diameter",
+    "eccentricity",
+    "hole_count",
+    "hole_area_ratio",
+    "angle_std",
+    "reflex_count",
+    "reflex_ratio",
+    "nn_dist_min",
+    "nn_dist_median",
+    "nn_dist_max",
+    "knn1",
+    "knn2",
+    "knn3",
+    "density_r05",
+    "density_r10",
+]
 
 # --- numeric stabilizer for per-polygon features (stateless; no leakage) ---
 def _stabilize_polygon_feats(feats: dict, bbox) -> dict:
     """
     Normalize length/area/distance features by the map scale, then log1p heavy-tailed positives.
-    Keeps the SAME feature keys so downstream 249-D schema is unchanged.
     """
     minx, miny, maxx, maxy = bbox
     bw = max(maxx - minx, 1e-12)
@@ -63,25 +90,17 @@ def _stabilize_polygon_feats(feats: dict, bbox) -> dict:
         if k in feats and np.isfinite(feats[k]):
             feats[k] = float(feats[k]) / diag
 
-    # areas -> divide by bbox area (extent already exists as area/bbox_area)
+    # areas -> divide by bbox area
     if "area" in feats and np.isfinite(feats["area"]):
         feats["area"] = float(feats["area"]) / bbox_area
-
-    # centroid_x / centroid_y are already bbox-normalized upstream; leave as-is.
-    # ratios (compactness, circularity, rectangularity, extent, convexity, straightness,
-    # bbox_aspect, eccentricity, hole_area_ratio, reflex_ratio) are unitless; leave as-is.
-
+        
     # ---- 2) log1p heavy-tailed positives (after normalization) ----
     _log_keys = {
-        "area", "perimeter", "vertex_count",
-        "neighbor_count_touches", "neighbor_count_intersects",
-        "mean_neighbor_distance_touches", "mean_neighbor_distance_intersects",
-        "bbox_width", "bbox_height", "eq_diameter",
+        "vertex_count",
         "hole_count",
-        "nn_dist_min", "nn_dist_median", "nn_dist_max",
-        "knn1", "knn2", "knn3",
-        "density_r05", "density_r10",
         "reflex_count",
+        # DO NOT add area/perimeter/distances/bbox sizes here since they are already scale-normalized.
+        # neighbor_count_* and density_* are already handled (N-normalize + log1p) outside.
     }
     for k in _log_keys:
         if k in feats:
@@ -91,11 +110,7 @@ def _stabilize_polygon_feats(feats: dict, bbox) -> dict:
             elif v is None or not np.isfinite(v):
                 feats[k] = 0.0  # make it finite
 
-    # Keep 'orientation' as degrees to preserve 249-D list (circularity handled downstream by scaler)
     return feats
-
-
-GeometryLike = Union[Polygon, MultiPolygon]
 
 # ---------- warning suppressor used around GEOS calls ----------
 @contextmanager
@@ -110,16 +125,15 @@ def _finite_coords(g: BaseGeometry) -> bool:
     if g.is_empty:
         return False
     # exterior
-    xs, ys = zip(*g.exterior.coords)
+    xs, ys = zip(*g.exterior.coords) #type: ignore
     if not (np.isfinite(xs).all() and np.isfinite(ys).all()):
         return False
     # holes
-    for r in g.interiors:
+    for r in g.interiors: #type: ignore
         xs, ys = zip(*r.coords)
         if not (np.isfinite(xs).all() and np.isfinite(ys).all()):
             return False
     return True
-
 
 def _fix_and_filter(geoms: Iterable[GeometryLike]) -> List[BaseGeometry]:
     """
@@ -139,11 +153,10 @@ def _fix_and_filter(geoms: Iterable[GeometryLike]) -> List[BaseGeometry]:
         fixed.append(gg)
     return fixed
 
-
 def _min_rotated_rect_axes(poly: Polygon) -> Tuple[float, float]:
     """Return the two side lengths (a >= b) of the polygon's minimum rotated rectangle."""
     mrr = poly.minimum_rotated_rectangle
-    coords = list(mrr.exterior.coords)
+    coords = list(mrr.exterior.coords) #type: ignore
     edges = []
     for i in range(len(coords) - 1):
         x1, y1 = coords[i]
@@ -207,7 +220,7 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
 
     # orientation from minimum rotated rectangle long axis
     mrr = poly.minimum_rotated_rectangle
-    mrr_coords = list(mrr.exterior.coords)
+    mrr_coords = list(mrr.exterior.coords) #type: ignore
     best_len, best_ang = 0.0, 0.0
     for k in range(len(mrr_coords) - 1):
         x1, y1 = mrr_coords[k]
@@ -217,7 +230,7 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         if L > best_len:
             best_len = L
             best_ang = math.degrees(math.atan2(dy, dx)) % 180.0  # 0..180
-    orientation = best_ang
+    theta = math.radians(best_ang)  # 0..π
 
     # --- moments / eccentricity (covariance of exterior vertices) ---
     xs, ys = zip(*list(poly.exterior.coords))
@@ -253,17 +266,23 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
     ext = list(poly.exterior.coords)[:-1]  # drop closing dup
     angles = []
     reflex = 0
-    n = len(ext)
-    if n >= 3:
-        for k in range(n):
-            a = ext[(k - 1) % n]; b = ext[k]; c = ext[(k + 1) % n]
+    n_vertices = len(ext)
+    if n_vertices >= 3:
+        for k in range(n_vertices):
+            a = ext[(k - 1) % n_vertices]; b = ext[k]; c = ext[(k + 1) % n_vertices]
             ang = _angle(a, b, c)
             angles.append(ang)
             cross = (b[0]-a[0])*(c[1]-b[1]) - (b[1]-a[1])*(c[0]-b[0])
             if cross < 0:
                 reflex += 1
-    angle_std = (sum((v - (sum(angles)/max(len(angles),1)))**2 for v in angles)/max(len(angles),1))**0.5 if angles else 0.0
-    reflex_ratio = reflex / max(n, 1)
+    if angles:
+        n_angles = len(angles)
+        mean_ang = sum(angles) / n_angles
+        var = sum((v - mean_ang) ** 2 for v in angles) / n_angles  # population variance (ddof=0)
+        angle_std = var ** 0.5
+    else:
+        angle_std = 0.0
+    reflex_ratio = reflex / max(n_vertices, 1)
 
     feats = {
         "area": area,
@@ -281,7 +300,8 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         "bbox_height": bh,
         "bbox_aspect": bbox_aspect,
         "extent": extent,
-        "orientation": orientation,
+        "orient_sin": math.sin(2*theta),
+        "orient_cos": math.cos(2*theta),
         "eq_diameter": (2.0 * (area / math.pi) ** 0.5) if area > 0 else 0.0,
         "eccentricity": eccentricity,
         "hole_count": hole_count,
@@ -290,122 +310,15 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         "reflex_count": reflex,
         "reflex_ratio": reflex_ratio,
     }
-    # IMPORTANT: stabilize values with map bbox (no dataset stats involved)
-    feats = _stabilize_polygon_feats(feats, bbox=bbox)
+    # Return raw feats; we stabilize later after adding neighbor/density fields.
     return feats
-
-
-# ---- CRS helpers (use only if your inputs are in degrees) ----
-
-def utm_epsg_from_lonlat(lon: float, lat: float) -> str:
-    """Pick a local UTM EPSG based on a lon/lat centroid."""
-    zone = int((lon + 180) // 6) + 1
-    south = lat < 0
-    return f"EPSG:{32700 + zone if south else 32600 + zone}"
-
-try:
-    from pyproj import Transformer
-    def reproject_polys_to_local_utm(polys: List[GeometryLike], src_epsg: str = "EPSG:4326"):
-        """
-        Reproject a list of Shapely (Multi)Polygons from src_epsg to a local UTM zone
-        chosen by the dataset centroid (computed in WGS84).
-        Returns (projected_polys, target_epsg).
-        """
-        # if src is not WGS84, convert to WGS84 just for centroid calculation
-        if src_epsg != "EPSG:4326":
-            to_wgs84 = Transformer.from_crs(src_epsg, "EPSG:4326", always_xy=True).transform
-            polys_wgs84 = [transform(to_wgs84, g) for g in polys]
-        else:
-            polys_wgs84 = polys
-
-        # union centroid
-        union = polys_wgs84[0]
-        for g in polys_wgs84[1:]:
-            union = union.union(g)
-        lon, lat = union.centroid.x, union.centroid.y
-
-        target_epsg = utm_epsg_from_lonlat(lon, lat)
-        tfm = Transformer.from_crs(src_epsg, target_epsg, always_xy=True).transform
-        polys_proj = [transform(tfm, g) for g in polys]
-        return polys_proj, target_epsg
-except Exception:
-    def reproject_polys_to_local_utm(polys: List[GeometryLike], src_epsg: str = "EPSG:4326"):
-        raise ImportError("pyproj is required for CRS reprojection. Install 'pyproj' to use this helper.")
-
-# Stable feature order for output columns (id is added separately)
-_NUMERIC_ORDER = [
-    "area",
-    "perimeter",
-    "vertex_count",
-    "centroid_x",
-    "centroid_y",
-    "compactness",
-    "circularity",
-    "elongation",
-    "convexity",
-    "rectangularity",
-    "straightness",
-    "neighbor_count_touches",
-    "mean_neighbor_distance_touches",
-    "neighbor_count_intersects",
-    "mean_neighbor_distance_intersects",
-    "bbox_width",
-    "bbox_height",
-    "bbox_aspect",
-    "extent",
-    "orientation",
-    "eq_diameter",
-    "eccentricity",
-    "hole_count",
-    "hole_area_ratio",
-    "angle_std",
-    "reflex_count",
-    "reflex_ratio",
-    "nn_dist_min",
-    "nn_dist_median",
-    "nn_dist_max",
-    "knn1",
-    "knn2",
-    "knn3",
-    "density_r05",
-    "density_r10",
-]
-
-# Optional: pure-Pandas normalizers if you don't want sklearn
-def _zscore(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    d = df.copy()
-    for c in cols:
-        mu = d[c].mean()
-        sd = d[c].std(ddof=0)
-        d[c] = 0.0 if sd == 0 else (d[c] - mu) / sd
-    return d
-
-def _minmax(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    d = df.copy()
-    for c in cols:
-        mn = d[c].min()
-        mx = d[c].max()
-        rng = mx - mn
-        d[c] = 0.0 if rng == 0 else (d[c] - mn) / rng
-    return d
 
 def embed_polygons_handcrafted(
     geoms: Iterable[GeometryLike],
-    normalize: Union[bool, str] = False,
-    return_scaler: bool = False,
-) -> Union[pd.DataFrame, Tuple[pd.DataFrame, object]]:
+) -> pd.DataFrame:
     """
     Compute hand-crafted feature vectors for Polygon/MultiPolygon geometries.
-
-    Parameters
-    ----------
-    geoms : iterable of shapely Polygon or MultiPolygon
-    normalize : bool or str
-        - False (default): return raw features
-        - True or "zscore": standardize (mean=0, std=1)
-        - "minmax": scale to [0,1]
-    return_scaler : bool
-        If True, also return the fitted scaler (for reuse at inference).
+    Returns a DataFrame with one row per polygon and stabilized numeric features.
     """
     # 1) Clean/validate and fix minor invalidities
     normalized: List[BaseGeometry] = _fix_and_filter(geoms)
@@ -475,14 +388,12 @@ def embed_polygons_handcrafted(
         def _to_indices(cands, pred: str) -> List[int]:
             """Convert STRtree results (indices or geoms) to indices; apply manual predicate if needed."""
             idxs: List[int] = []
-            # robust emptiness check for list/tuple/ndarray
             size = getattr(cands, "size", None)
             if (size == 0) or (size is None and len(cands) == 0):
                 return idxs
             if geom.is_empty or not geom.is_valid:
                 return idxs
 
-            # First element tells us if results are indices or geoms
             first = cands[0]
 
             def _accept(j: int) -> bool:
@@ -497,13 +408,12 @@ def embed_polygons_handcrafted(
                         return False
                     if pred == "intersects":
                         return True
-                    # pred == "overlap": intersects but not touches, no containment
                     return (not _safe_touches(geom, gj)
                             and not geom.contains(gj)
                             and not geom.within(gj))
                 return False
 
-            if isinstance(first, Integral):
+            if isinstance(first, (int, np.integer)):
                 for j in cands:
                     j = int(j)
                     if j != i and _accept(j):
@@ -555,7 +465,17 @@ def embed_polygons_handcrafted(
             if nbr_inter else 0.0
         )
 
+        # Size-normalize counts/densities by (N-1)
+        N = float(len(normalized))
+        feats["neighbor_count_touches"]    = feats["neighbor_count_touches"] / max(N-1, 1.0)
+        feats["neighbor_count_intersects"] = feats["neighbor_count_intersects"] / max(N-1, 1.0)
+        feats["density_r05"]               = feats["density_r05"] / max(N-1, 1.0)
+        feats["density_r10"]               = feats["density_r10"] / max(N-1, 1.0)
+
         feats["id"] = i + 1
+
+        # Final stabilization AFTER all features are present
+        feats = _stabilize_polygon_feats(feats, bbox=bbox)
         rows.append(feats)
 
     # 4) DataFrame + stable column order
@@ -564,82 +484,46 @@ def embed_polygons_handcrafted(
     extras = [c for c in df.columns if c not in ordered]
     df = df[ordered + extras]
 
-    # 5) Optional normalization
-    scaler_obj: Optional[object] = None
-    if normalize:
-        scaler_obj = StandardScaler() if normalize in (True, "zscore") else MinMaxScaler()
-        feat_cols = [c for c in df.columns if c != "id"]
-        df[feat_cols] = scaler_obj.fit_transform(df[feat_cols])
+    # Optional: clip upper 0.5% per feature within this map to reduce sliver spikes
+    feat_cols = [c for c in df.columns if c != "id"]
+    if len(df) > 0 and len(feat_cols) > 0:
+        q_hi = df[feat_cols].quantile(0.995, axis=0, numeric_only=True)
+        for c in feat_cols:
+            hi = q_hi.get(c, None)
+            if hi is not None and np.isfinite(hi):
+                df[c] = np.minimum(df[c], float(hi))
 
-    return (df, scaler_obj) if return_scaler else df
+    # Final safety: replace any residual NaN/Inf with Median
+    df = df.replace([np.inf, -np.inf], np.nan)
+    feat_cols = [c for c in df.columns if c != "id"]
+    for c in feat_cols:
+        med = pd.to_numeric(df[c], errors="coerce").median(skipna=True)
+        if pd.notna(med):
+            df[c] = df[c].fillna(float(med))
+        else:
+            # column is all-NaN → harmless fallback
+            df[c] = df[c].fillna(0.0)
+    return df
 
-# ---------------- CLI with GeoJSON + auto-CRS ----------------
-
-# Optional CLI: requires GeoPandas. If you don't need CLI, you can delete this block.
-def _load_geojson_polygons(project_to_local_utm: bool, path: str) -> List[GeometryLike]:
-    """
-    Load (Multi)Polygons from GeoJSON.
-    If project_to_local_utm=True, reproject to a local UTM chosen by the dataset centroid.
-    """
-    try:
-        import geopandas as gpd
-    except Exception as e:
-        raise ImportError("GeoPandas is required for CLI loading.") from e
-
+# --------- Minimal CLI (optional) ----------
+def _load_geojson_polygons(path: str) -> list:
+    import geopandas as gpd
     gdf = gpd.read_file(path)
     if gdf.crs is None:
-        gdf = gdf.set_crs("EPSG:4326")  # GeoJSON default
-
-    if not project_to_local_utm:
-        return list(gdf.geometry)
-
-    # choose UTM by dataset centroid in WGS84
-    gdf_wgs84 = gdf.to_crs("EPSG:4326")
-    lon = gdf_wgs84.unary_union.centroid.x
-    lat = gdf_wgs84.unary_union.centroid.y
-    target = utm_epsg_from_lonlat(lon, lat)
-    gdf_proj = gdf.to_crs(target)
-    return list(gdf_proj.geometry)
-
-
-def _save_csv(df: pd.DataFrame, path: str) -> None:
-    df.to_csv(path, index=False)
-
+        gdf = gdf.set_crs("EPSG:4326")  # default for GeoJSON; fine since we use bbox-normalization
+    return list(gdf.geometry)
 
 def main(argv=None):
-    """
-    CLI:
-        python polygon_embeddings.py input.geojson output.csv [normalize] [--utm]
-    where:
-        normalize ∈ {none, zscore, minmax}  (default: none)
-        --utm: reproject input to local UTM before feature extraction.
-    """
-    argv = argv or sys.argv[1:]
-    if len(argv) < 2:
-        print("Usage: python polygon_embeddings.py <input.geojson> <output.csv> [normalize] [--utm]")
-        print(" normalize: none (default) | zscore | minmax")
-        print(" --utm: reproject to local UTM for metric area/length/distance")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(description="Extract stabilized polygon features to CSV.")
+    parser.add_argument("input", help="Input GeoJSON")
+    parser.add_argument("output", help="Output CSV")
+    args = parser.parse_args(argv)
 
-    in_path = argv[0]
-    out_path = argv[1]
-    norm = "none"
-    project_to_utm = False
-
-    for a in argv[2:]:
-        if a.lower() in ("none", "zscore", "minmax"):
-            norm = a.lower()
-        elif a == "--utm":
-            project_to_utm = True
-
-    norm_arg: Optional[Union[bool, str]] = (False if norm == "none"
-                                            else ("zscore" if norm == "zscore" else "minmax"))
-
-    geoms = _load_geojson_polygons(project_to_utm, in_path)
-    df = embed_polygons_handcrafted(geoms, normalize=norm_arg, return_scaler=False)
-    _save_csv(df, out_path)
-    print(f"Saved {len(df)} polygon embeddings to {out_path} (normalize={norm}, utm={project_to_utm})")
-
+    geoms = _load_geojson_polygons(args.input)
+    df = embed_polygons_handcrafted(geoms)
+    df.to_csv(args.output, index=False)
+    print(f"Saved {len(df)} polygon embeddings to {args.output}")
 
 if __name__ == "__main__":
     main()
