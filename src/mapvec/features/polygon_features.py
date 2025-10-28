@@ -234,17 +234,30 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
 
     # --- moments / eccentricity (covariance of exterior vertices) ---
     xs, ys = zip(*list(poly.exterior.coords))
+    # simple (unweighted) covariance of boundary vertices
     mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
     dxs = [x - mx for x in xs]; dys = [y - my for y in ys]
     cxx = sum(v*v for v in dxs) / max(len(xs)-1, 1)
     cyy = sum(v*v for v in dys) / max(len(xs)-1, 1)
     cxy = sum(a*b for a,b in zip(dxs, dys)) / max(len(xs)-1, 1)
-    tr = cxx + cyy
-    det = cxx*cyy - cxy*cxy
-    delta = max(0.0, tr*tr/4 - det)
-    lam1 = tr/2 + delta**0.5
-    lam2 = tr/2 - delta**0.5
-    eccentricity = (lam1 / max(lam2, 1e-12)) if lam1 >= lam2 and lam2 > 0 else 0.0
+
+    # eigenvalues of 2x2 covariance (sorted: lam1 >= lam2 >= 0)
+    vals = np.linalg.eigvalsh(np.array([[cxx, cxy], [cxy, cyy]], dtype=float))
+    lam2, lam1 = float(vals[0]), float(vals[1])
+
+    if lam1 <= 0 or lam2 <= 0:
+        # degenerate (line-like or point-like) → treat as almost 1
+        eccentricity = 0.0 if lam1 <= 0 else 0.999999
+    else:
+        # axis ratio r = a/b = sqrt(lam1/lam2); true ellipse eccentricity e in [0,1)
+        r = math.sqrt(lam1 / lam2)
+        # numerical guard for near-isotropic shapes
+        if r < 1.0 + 1e-12:
+            eccentricity = 0.0
+        else:
+            eccentricity = math.sqrt(max(0.0, 1.0 - 1.0 / (r * r)))
+            # hard clip to avoid rare >1 due to fp
+            eccentricity = min(eccentricity, 0.999999)
 
     # --- holes ---
     hole_count = len(poly.interiors)

@@ -6,7 +6,8 @@ def pool_map_embedding(
     exclude=("id",),                 # columns not to pool
     stats=("mean","std","min","max"),
     quantiles=(0.25, 0.50, 0.75),    # add robust stats
-    add_globals=True                 # extra global scalars
+    add_globals=True,                # extra global scalars
+    max_polygons: float | int | None = None,  # <-- NEW: dataset-wide max polygon count
 ):
     """
     Turn a per-polygon feature table into one fixed-length map embedding.
@@ -69,8 +70,10 @@ def pool_map_embedding(
     # --- optional global scalars ---
     if add_globals:
         N = float(len(df_polys))
-        N_log = float(np.log1p(N))  # stabilized polygon count
-
+        # NEW: normalized polygon count in [0,1]
+        denom = float(max_polygons) if (max_polygons is not None and max_polygons > 0) else 1.0
+        N_norm = N / denom
+        
         # centroid-based spread in normalized space (0..1)
         if {"centroid_x", "centroid_y"}.issubset(df_polys.columns):
             cx = pd.to_numeric(df_polys["centroid_x"], errors="coerce").replace([np.inf, -np.inf], np.nan)
@@ -88,7 +91,7 @@ def pool_map_embedding(
             spread_w = spread_h = spread_aspect = 0.0
             
         spread_aspect = np.log1p(spread_aspect)
-        parts.append(np.array([N_log, spread_w, spread_h, spread_aspect], dtype=float))
+        parts.append(np.array([N_norm, spread_w, spread_h, spread_aspect], dtype=float))
         names += ["poly_count", "poly_spread_w", "poly_spread_h", "poly_spread_aspect"]
 
     # --- finalize ---

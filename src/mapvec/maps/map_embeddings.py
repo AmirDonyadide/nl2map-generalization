@@ -117,6 +117,17 @@ def _fix_polygon(poly: Polygon) -> Polygon | None:
     except Exception:
         return None
 
+def _count_valid_polygons(gj_path: Path) -> int:
+    """Read, clean, and count valid polygon parts in a single map file."""
+    gdf = _read_geo(gj_path)
+    try:
+        if gdf.crs and getattr(gdf.crs, "is_geographic", False):
+            gdf = gdf.to_crs(3857)
+    except Exception:
+        pass
+    geoms = _flatten_and_clean_to_polygons(gdf)
+    return len(geoms)
+
 def _flatten_and_clean_to_polygons(gdf, area_eps=1e-12):
     """Return a list of valid Polygons suitable for feature extraction."""
     polys = []
@@ -131,18 +142,16 @@ def _flatten_and_clean_to_polygons(gdf, area_eps=1e-12):
             polys.append(p2)
     return polys
 
-def embed_one_map(gj_path: Path) -> Tuple[np.ndarray, List[str]]:
+def embed_one_map(gj_path: Path, max_polygons: int | float | None = None) -> Tuple[np.ndarray, List[str]]:
     gdf = _read_geo(gj_path)
 
-    # Optional but recommended: project to a metric CRS before area/perimeter stats
     try:
         if gdf.crs and getattr(gdf.crs, "is_geographic", False):
             gdf = gdf.to_crs(3857)  # Web Mercator: meters
     except Exception:
-        pass  # keep original CRS if reprojection fails
+        pass
 
     geoms = _flatten_and_clean_to_polygons(gdf)
-
     if len(geoms) == 0:
         raise ValueError("No valid polygon parts after flatten/clean (all invalid/empty?).")
 
@@ -156,6 +165,7 @@ def embed_one_map(gj_path: Path) -> Tuple[np.ndarray, List[str]]:
         stats=("mean", "std", "min", "max"),
         quantiles=(0.25, 0.50, 0.75),
         add_globals=True,
+        max_polygons=max_polygons,   # <-- NEW
     )
 
     if vec is None or vec.size == 0:
@@ -257,20 +267,40 @@ def main():
         logging.error("Root folder not found: %s", root)
         sys.exit(1)
 
+    logging.info("Scanning %s (pattern=%s)…", root, args.pattern)
+
+    # Collect all candidates once so we can do two passes
+    pairs = list(find_geojsons(root, args.pattern))
+    if not pairs:
+        logging.error("No GeoJSONs embedded. Check --root and --pattern.")
+        sys.exit(2)
+
+    # ---------- First pass: compute dataset-wide max_polygons ----------
+    logging.info("First pass: counting polygons to normalize poly_count…")
+    counts: Dict[str, int] = {}
+    for map_id, path in pairs:
+        try:
+            counts[map_id] = _count_valid_polygons(path)
+        except Exception as e:
+            logging.warning("Count failed for %s: %s", map_id, e)
+            counts[map_id] = 0
+    max_polygons = max(max(counts.values()), 1)
+    logging.info("Max polygons across dataset: %d", max_polygons)
+
+    # ---------- Second pass: embed with normalized poly_count ----------
     ids: List[str] = []
     vecs: List[np.ndarray] = []
     rows: List[Dict] = []
     feat_names: List[str] | None = None
 
-    logging.info("Scanning %s (pattern=%s)…", root, args.pattern)
     total = 0
     failed = 0
     first_dim: int | None = None
 
-    for map_id, path in find_geojsons(root, args.pattern):
+    for map_id, path in pairs:
         total += 1
         try:
-            vec, names = embed_one_map(path)
+            vec, names = embed_one_map(path, max_polygons=max_polygons)
 
             # ensure consistent dimensionality across tiles
             if first_dim is None:
@@ -291,6 +321,7 @@ def main():
             rows.append({
                 "map_id": map_id,
                 "geojson": str(path),
+                "n_polygons": int(counts.get(map_id, 0)),  # record per-map polygon count
                 **{k: meta.get(k) for k in (
                     "operator","intensity","param_value","param_unit",
                     "input_png","target_png","input_geojson","target_geojson",
@@ -303,7 +334,7 @@ def main():
             logging.error("FAIL map_id=%s: %s", map_id, e)
 
     if not ids:
-        logging.error("No GeoJSONs embedded. Check --root and --pattern. (processed=%d, failed=%d)", total, failed)
+        logging.error("No GeoJSONs embedded. (processed=%d, failed=%d)", total, failed)
         sys.exit(2)
 
     # Stack to (M, D) and persist artifacts
