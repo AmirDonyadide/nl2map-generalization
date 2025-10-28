@@ -32,27 +32,21 @@ _NUMERIC_ORDER = [
     "vertex_count",
     "centroid_x",
     "centroid_y",
-    "compactness",
     "circularity",
     "elongation",
     "convexity",
     "rectangularity",
-    "straightness",
     "neighbor_count_touches",
     "mean_neighbor_distance_touches",
     "neighbor_count_intersects",
     "mean_neighbor_distance_intersects",
     "bbox_width",
     "bbox_height",
-    "bbox_aspect",
-    "extent",
     "orient_sin",
     "orient_cos",
     "eq_diameter",
     "eccentricity",
-    "hole_count",
-    "hole_area_ratio",
-    "angle_std",
+    "has_hole",
     "reflex_count",
     "reflex_ratio",
     "nn_dist_min",
@@ -97,7 +91,6 @@ def _stabilize_polygon_feats(feats: dict, bbox) -> dict:
     # ---- 2) log1p heavy-tailed positives (after normalization) ----
     _log_keys = {
         "vertex_count",
-        "hole_count",
         "reflex_count",
         # DO NOT add area/perimeter/distances/bbox sizes here since they are already scale-normalized.
         # neighbor_count_* and density_* are already handled (N-normalize + log1p) outside.
@@ -110,7 +103,14 @@ def _stabilize_polygon_feats(feats: dict, bbox) -> dict:
             elif v is None or not np.isfinite(v):
                 feats[k] = 0.0  # make it finite
 
+    # ---- 3) Shape ratio compression ----
+    # Elongation (>=1): compress tail so 1 -> 0, 2 -> 0.69, 5 -> 1.61, 20 -> 3.00
+    if "elongation" in feats and np.isfinite(feats["elongation"]):
+        e = max(1.0, float(feats["elongation"]))     # ensure at least 1
+        feats["elongation"] = float(np.log1p(e - 1.0))
+
     return feats
+
 
 # ---------- warning suppressor used around GEOS calls ----------
 @contextmanager
@@ -175,8 +175,8 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         return {
             "area": 0.0, "perimeter": 0.0, "vertex_count": 0,
             "centroid_x": 0.0, "centroid_y": 0.0,
-            "compactness": 0.0, "circularity": 0.0, "elongation": 0.0,
-            "convexity": 0.0, "rectangularity": 0.0, "straightness": 0.0,
+            "circularity": 0.0, "elongation": 0.0,
+            "convexity": 0.0, "rectangularity": 0.0,
         }
 
     area = poly.area
@@ -195,7 +195,6 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         cx_n, cy_n = cx, cy
 
     # shape descriptors
-    compactness = (perimeter ** 2) / (4 * math.pi * area) if area > 0 else 0.0
     circularity = (4 * math.pi * area) / (perimeter ** 2) if perimeter > 0 else 0.0
 
     a, b = _min_rotated_rect_axes(poly)
@@ -207,16 +206,10 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
     mrr = poly.minimum_rotated_rectangle
     rectangularity = (area / mrr.area) if mrr.area > 0 else 0.0
 
-    # >= 1.0; closer to 1 means boundary close to convex hull
-    straightness = (perimeter / hull.length) if hull.length > 0 else 0.0
-
     # --- bounding box & orientation ---
     bxmin, bymin, bxmax, bymax = poly.bounds
     bw = max(bxmax - bxmin, 1e-12)
     bh = max(bymax - bymin, 1e-12)
-    bbox_area = bw * bh
-    bbox_aspect = bw / bh if bh > 0 else 0.0
-    extent = area / bbox_area if bbox_area > 0 else 0.0
 
     # orientation from minimum rotated rectangle long axis
     mrr = poly.minimum_rotated_rectangle
@@ -260,9 +253,8 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
             eccentricity = min(eccentricity, 0.999999)
 
     # --- holes ---
-    hole_count = len(poly.interiors)
-    hole_area = sum(Polygon(ring).area for ring in poly.interiors)
-    hole_area_ratio = (hole_area / area) if area > 0 else 0.0
+    has_hole = 1.0 if len(poly.interiors) > 0 else 0.0
+
 
     # --- vertex angle / reflex stats (exterior only) ---
     def _angle(a, b, c):
@@ -288,13 +280,7 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
             cross = (b[0]-a[0])*(c[1]-b[1]) - (b[1]-a[1])*(c[0]-b[0])
             if cross < 0:
                 reflex += 1
-    if angles:
-        n_angles = len(angles)
-        mean_ang = sum(angles) / n_angles
-        var = sum((v - mean_ang) ** 2 for v in angles) / n_angles  # population variance (ddof=0)
-        angle_std = var ** 0.5
-    else:
-        angle_std = 0.0
+                
     reflex_ratio = reflex / max(n_vertices, 1)
 
     feats = {
@@ -303,23 +289,17 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         "vertex_count": vcount,
         "centroid_x": cx_n,
         "centroid_y": cy_n,
-        "compactness": compactness,
         "circularity": circularity,
         "elongation": elongation,
         "convexity": convexity,
         "rectangularity": rectangularity,
-        "straightness": straightness,
         "bbox_width": bw,
         "bbox_height": bh,
-        "bbox_aspect": bbox_aspect,
-        "extent": extent,
         "orient_sin": math.sin(2*theta),
         "orient_cos": math.cos(2*theta),
         "eq_diameter": (2.0 * (area / math.pi) ** 0.5) if area > 0 else 0.0,
         "eccentricity": eccentricity,
-        "hole_count": hole_count,
-        "hole_area_ratio": hole_area_ratio,
-        "angle_std": angle_std,
+        "has_hole": has_hole,
         "reflex_count": reflex,
         "reflex_ratio": reflex_ratio,
     }
