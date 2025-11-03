@@ -142,7 +142,8 @@ def _flatten_and_clean_to_polygons(gdf, area_eps=1e-12):
             polys.append(p2)
     return polys
 
-def embed_one_map(gj_path: Path, max_polygons: int | float | None = None) -> Tuple[np.ndarray, List[str]]:
+def embed_one_map(gj_path: Path, max_polygons: int | float | None = None,norm: str = "extent", norm_wh: str | None = None
+                  ) -> Tuple[np.ndarray, List[str]]:
     gdf = _read_geo(gj_path)
 
     try:
@@ -155,9 +156,15 @@ def embed_one_map(gj_path: Path, max_polygons: int | float | None = None) -> Tup
     if len(geoms) == 0:
         raise ValueError("No valid polygon parts after flatten/clean (all invalid/empty?).")
 
-    df_polys = embed_polygons_handcrafted(geoms)
-    if df_polys is None or df_polys.empty:
-        raise ValueError("Feature table is empty after extraction.")
+    # Parse norm_wh when provided (e.g., "400x400")
+    _fixed = None
+    if norm == "fixed":
+        if not norm_wh or "x" not in norm_wh.lower():
+            raise ValueError("Use --norm-wh like '400x400' with --norm=fixed")
+        w_str, h_str = norm_wh.lower().split("x", 1)
+        _fixed = (float(w_str), float(h_str))
+
+    df_polys = embed_polygons_handcrafted(geoms, norm_mode=norm, fixed_wh=_fixed)    
 
     vec, names = pool_map_embedding(
         df_polys,
@@ -248,6 +255,11 @@ def save_outputs(
 # ----------------------- CLI -----------------------
 def main():
     ap = argparse.ArgumentParser(description="Compute fixed-D map embeddings from GeoJSON tiles.")
+    ap.add_argument("--norm", choices=["extent","fixed"], default="extent",
+                    help="Normalization scale: per-tile extent (default) or fixed width/height.")
+    ap.add_argument("--norm-wh", type=str, default=None,
+                    help="WidthxHeight in meters when --norm=fixed, e.g. '400x400'.")
+
     ap.add_argument("--root", type=str, default=str(DATA_DIR / "samples" / "pairs"),
                     help="Root folder with <map_id>/ subfolders (default: data/samples/pairs).")
     ap.add_argument("--pattern", type=str, default="*_input.geojson",
@@ -300,8 +312,7 @@ def main():
     for map_id, path in pairs:
         total += 1
         try:
-            vec, names = embed_one_map(path, max_polygons=max_polygons)
-
+            vec, names = embed_one_map(path, max_polygons=max_polygons,norm=args.norm, norm_wh=args.norm_wh)
             # ensure consistent dimensionality across tiles
             if first_dim is None:
                 first_dim = int(vec.shape[0])

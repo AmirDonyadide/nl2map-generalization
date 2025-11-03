@@ -29,17 +29,14 @@ GeometryLike = Union[Polygon, MultiPolygon]
 _NUMERIC_ORDER = [
     "area",
     "perimeter",
-    "vertex_count",
     "centroid_x",
     "centroid_y",
     "circularity",
-    "elongation",
+    "axis_ratio",
     "convexity",
     "rectangularity",
-    "neighbor_count_touches",
-    "mean_neighbor_distance_touches",
-    "neighbor_count_intersects",
-    "mean_neighbor_distance_intersects",
+    "neighbor_count",
+    "mean_neighbor_distance",
     "bbox_width",
     "bbox_height",
     "orient_sin",
@@ -47,7 +44,6 @@ _NUMERIC_ORDER = [
     "eq_diameter",
     "eccentricity",
     "has_hole",
-    "reflex_count",
     "reflex_ratio",
     "nn_dist_min",
     "nn_dist_median",
@@ -59,55 +55,33 @@ _NUMERIC_ORDER = [
     "density_r10",
 ]
 
-# --- numeric stabilizer for per-polygon features (stateless; no leakage) ---
+_BY_DIAG = [
+    "perimeter", "mean_neighbor_distance", "eq_diameter",
+    "nn_dist_min", "nn_dist_median", "nn_dist_max",
+    "knn1", "knn2", "knn3",
+    "bbox_width", "bbox_height",
+]
+
 def _stabilize_polygon_feats(feats: dict, bbox) -> dict:
-    """
-    Normalize length/area/distance features by the map scale, then log1p heavy-tailed positives.
-    """
     minx, miny, maxx, maxy = bbox
     bw = max(maxx - minx, 1e-12)
     bh = max(maxy - miny, 1e-12)
     bbox_area = bw * bh
     diag = (bw * bw + bh * bh) ** 0.5
 
-    # ---- 1) Normalize to remove units ------------------------------
-    # lengths / distances -> divide by diag
-    _by_diag = [
-        "perimeter",
-        "mean_neighbor_distance_touches", "mean_neighbor_distance_intersects",
-        "eq_diameter",
-        "nn_dist_min", "nn_dist_median", "nn_dist_max",
-        "knn1", "knn2", "knn3",
-        "bbox_width", "bbox_height",
-    ]
-    for k in _by_diag:
+    # divide lengths/distances by diag
+    for k in _BY_DIAG:
         if k in feats and np.isfinite(feats[k]):
             feats[k] = float(feats[k]) / diag
 
-    # areas -> divide by bbox area
+    # divide area by bbox area
     if "area" in feats and np.isfinite(feats["area"]):
         feats["area"] = float(feats["area"]) / bbox_area
-        
-    # ---- 2) log1p heavy-tailed positives (after normalization) ----
-    _log_keys = {
-        "vertex_count",
-        "reflex_count",
-        # DO NOT add area/perimeter/distances/bbox sizes here since they are already scale-normalized.
-        # neighbor_count_* and density_* are already handled (N-normalize + log1p) outside.
-    }
-    for k in _log_keys:
-        if k in feats:
-            v = feats[k]
-            if v is not None and np.isfinite(v) and v >= 0:
-                feats[k] = float(np.log1p(v))
-            elif v is None or not np.isfinite(v):
-                feats[k] = 0.0  # make it finite
 
-    # ---- 3) Shape ratio compression ----
-    # Elongation (>=1): compress tail so 1 -> 0, 2 -> 0.69, 5 -> 1.61, 20 -> 3.00
-    if "elongation" in feats and np.isfinite(feats["elongation"]):
-        e = max(1.0, float(feats["elongation"]))     # ensure at least 1
-        feats["elongation"] = float(np.log1p(e - 1.0))
+    # map orientation components from [-1,1] to [0,1]
+    for k in ("orient_sin", "orient_cos"):
+        if k in feats and np.isfinite(feats[k]):
+            feats[k] = 0.5 * (feats[k] + 1.0)
 
     return feats
 
@@ -169,21 +143,19 @@ def _min_rotated_rect_axes(poly: Polygon) -> Tuple[float, float]:
 
 
 def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
-    """Compute a compact set of features for a single Polygon. Centroid can be bbox-normalized."""
-    # guard invalid / empty shapes
+    """Compute compact features for a single Polygon. Centroid can be bbox-normalized."""
     if poly is None or poly.is_empty or not poly.is_valid:
         return {
-            "area": 0.0, "perimeter": 0.0, "vertex_count": 0,
+            "area": 0.0, "perimeter": 0.0,
             "centroid_x": 0.0, "centroid_y": 0.0,
-            "circularity": 0.0, "elongation": 0.0,
+            "circularity": 0.0, "axis_ratio": 0.0,
             "convexity": 0.0, "rectangularity": 0.0,
         }
 
     area = poly.area
     perimeter = poly.length
-    vcount = max(len(poly.exterior.coords) - 1, 0)  # exclude closing point
 
-    # centroid (optionally normalized by dataset bbox)
+    # centroid (optionally normalized)
     cx, cy = poly.centroid.x, poly.centroid.y
     if bbox is not None:
         minx, miny, maxx, maxy = bbox
@@ -197,23 +169,21 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
     # shape descriptors
     circularity = (4 * math.pi * area) / (perimeter ** 2) if perimeter > 0 else 0.0
 
-    a, b = _min_rotated_rect_axes(poly)
-    elongation = (a / b) if b > 0 else 0.0
+    a, b = _min_rotated_rect_axes(poly)        # from min rotated rectangle
+    axis_ratio = float(min(1.0, max(0.0, (b / a) if a > 0 else 0.0)))
 
     hull = poly.convex_hull
     convexity = (area / hull.area) if hull.area > 0 else 0.0
 
-    mrr = poly.minimum_rotated_rectangle
+    mrr = poly.minimum_rotated_rectangle       # cache once
     rectangularity = (area / mrr.area) if mrr.area > 0 else 0.0
 
-    # --- bounding box & orientation ---
-    bxmin, bymin, bxmax, bymax = poly.bounds
-    bw = max(bxmax - bxmin, 1e-12)
-    bh = max(bymax - bymin, 1e-12)
+    # bbox width/height (no need for min/max vars)
+    bw = max(poly.bounds[2] - poly.bounds[0], 1e-12)
+    bh = max(poly.bounds[3] - poly.bounds[1], 1e-12)
 
-    # orientation from minimum rotated rectangle long axis
-    mrr = poly.minimum_rotated_rectangle
-    mrr_coords = list(mrr.exterior.coords) #type: ignore
+    # orientation from the long edge of the MRR
+    mrr_coords = list(mrr.exterior.coords)     # type: ignore
     best_len, best_ang = 0.0, 0.0
     for k in range(len(mrr_coords) - 1):
         x1, y1 = mrr_coords[k]
@@ -222,75 +192,47 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         L = (dx*dx + dy*dy) ** 0.5
         if L > best_len:
             best_len = L
-            best_ang = math.degrees(math.atan2(dy, dx)) % 180.0  # 0..180
+            best_ang = math.degrees(math.atan2(dy, dx)) % 180.0
     theta = math.radians(best_ang)  # 0..π
 
-    # --- moments / eccentricity (covariance of exterior vertices) ---
+    # moments / eccentricity
     xs, ys = zip(*list(poly.exterior.coords))
-    # simple (unweighted) covariance of boundary vertices
     mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
     dxs = [x - mx for x in xs]; dys = [y - my for y in ys]
     cxx = sum(v*v for v in dxs) / max(len(xs)-1, 1)
     cyy = sum(v*v for v in dys) / max(len(xs)-1, 1)
-    cxy = sum(a*b for a,b in zip(dxs, dys)) / max(len(xs)-1, 1)
-
-    # eigenvalues of 2x2 covariance (sorted: lam1 >= lam2 >= 0)
+    cxy = sum(a*b for a, b in zip(dxs, dys)) / max(len(xs)-1, 1)
     vals = np.linalg.eigvalsh(np.array([[cxx, cxy], [cxy, cyy]], dtype=float))
     lam2, lam1 = float(vals[0]), float(vals[1])
 
     if lam1 <= 0 or lam2 <= 0:
-        # degenerate (line-like or point-like) → treat as almost 1
         eccentricity = 0.0 if lam1 <= 0 else 0.999999
     else:
-        # axis ratio r = a/b = sqrt(lam1/lam2); true ellipse eccentricity e in [0,1)
         r = math.sqrt(lam1 / lam2)
-        # numerical guard for near-isotropic shapes
-        if r < 1.0 + 1e-12:
-            eccentricity = 0.0
-        else:
-            eccentricity = math.sqrt(max(0.0, 1.0 - 1.0 / (r * r)))
-            # hard clip to avoid rare >1 due to fp
-            eccentricity = min(eccentricity, 0.999999)
+        eccentricity = 0.0 if r < 1.0 + 1e-12 else min(math.sqrt(max(0.0, 1.0 - 1.0/(r*r))), 0.999999)
 
-    # --- holes ---
+    # holes
     has_hole = 1.0 if len(poly.interiors) > 0 else 0.0
 
-
-    # --- vertex angle / reflex stats (exterior only) ---
-    def _angle(a, b, c):
-        # angle ABC in radians
-        bax = a[0] - b[0]; bay = a[1] - b[1]
-        bcx = c[0] - b[0]; bcy = c[1] - b[1]
-        dot = bax*bcx + bay*bcy
-        la = (bax*bax + bay*bay) ** 0.5
-        lb = (bcx*bcx + bcy*bcy) ** 0.5
-        if la == 0 or lb == 0: return 0.0
-        cosv = max(-1.0, min(1.0, dot / (la*lb)))
-        return math.acos(cosv)
-
-    ext = list(poly.exterior.coords)[:-1]  # drop closing dup
-    angles = []
+    # reflex ratio (exterior only) — angle values not needed
+    ext = list(poly.exterior.coords)[:-1]
     reflex = 0
     n_vertices = len(ext)
     if n_vertices >= 3:
         for k in range(n_vertices):
-            a = ext[(k - 1) % n_vertices]; b = ext[k]; c = ext[(k + 1) % n_vertices]
-            ang = _angle(a, b, c)
-            angles.append(ang)
-            cross = (b[0]-a[0])*(c[1]-b[1]) - (b[1]-a[1])*(c[0]-b[0])
+            a0 = ext[(k - 1) % n_vertices]; b0 = ext[k]; c0 = ext[(k + 1) % n_vertices]
+            cross = (b0[0]-a0[0])*(c0[1]-b0[1]) - (b0[1]-a0[1])*(c0[0]-b0[0])
             if cross < 0:
                 reflex += 1
-                
     reflex_ratio = reflex / max(n_vertices, 1)
 
-    feats = {
+    return {
         "area": area,
         "perimeter": perimeter,
-        "vertex_count": vcount,
         "centroid_x": cx_n,
         "centroid_y": cy_n,
         "circularity": circularity,
-        "elongation": elongation,
+        "axis_ratio": axis_ratio,
         "convexity": convexity,
         "rectangularity": rectangularity,
         "bbox_width": bw,
@@ -300,66 +242,89 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         "eq_diameter": (2.0 * (area / math.pi) ** 0.5) if area > 0 else 0.0,
         "eccentricity": eccentricity,
         "has_hole": has_hole,
-        "reflex_count": reflex,
         "reflex_ratio": reflex_ratio,
     }
-    # Return raw feats; we stabilize later after adding neighbor/density fields.
-    return feats
 
 def embed_polygons_handcrafted(
     geoms: Iterable[GeometryLike],
+    norm_mode: str = "extent",                      # "extent" | "fixed"
+    fixed_wh: tuple[float, float] | None = None,    # (width, height) when norm_mode="fixed"
 ) -> pd.DataFrame:
-    """
-    Compute hand-crafted feature vectors for Polygon/MultiPolygon geometries.
-    Returns a DataFrame with one row per polygon and stabilized numeric features.
-    """
-    # 1) Clean/validate and fix minor invalidities
+    # 1) Clean/validate
     normalized: List[BaseGeometry] = _fix_and_filter(geoms)
     if not normalized:
         return pd.DataFrame(columns=["id"] + _NUMERIC_ORDER)
 
-    # 2) Dataset bbox for centroid normalization and centroids for distances
+    # 2) Real polygon extent (always computed once)
     minx = min(g.bounds[0] for g in normalized)
     miny = min(g.bounds[1] for g in normalized)
     maxx = max(g.bounds[2] for g in normalized)
     maxy = max(g.bounds[3] for g in normalized)
-    bbox = (minx, miny, maxx, maxy)
+    bbox_extent = (minx, miny, maxx, maxy)
+
+    # Decide the normalization scales (ONE mode drives both diag/area AND centroid normalization)
+    if norm_mode == "fixed":
+        # desired fixed frame (defaults to 400x400 if not given)
+        W_desired, H_desired = (fixed_wh if fixed_wh is not None else (400.0, 400.0))
+        W_desired = float(W_desired); H_desired = float(H_desired)
+
+        # current polygon extent
+        ext_w = maxx - minx
+        ext_h = maxy - miny
+
+        # how much we are short of the desired size
+        pad_w_total = max(0.0, W_desired - ext_w)
+        pad_h_total = max(0.0, H_desired - ext_h)
+
+        # split padding evenly on both sides
+        pad_left   = pad_w_total * 0.5
+        pad_right  = pad_w_total * 0.5
+        pad_bottom = pad_h_total * 0.5
+        pad_top    = pad_h_total * 0.5
+
+        # anchor the centroid frame at the padded origin and make it exactly W_desired x H_desired
+        origin_x = minx - pad_left
+        origin_y = miny - pad_bottom
+
+        # scale used for diag/area + density radii is the fixed size
+        scale_bbox    = (0.0, 0.0, W_desired, H_desired)
+
+        # centroid_x/centroid_y are normalized to the padded fixed frame
+        centroid_bbox = (origin_x, origin_y, origin_x + W_desired, origin_y + H_desired)
+
+    else:
+        # extent mode (original behavior)
+        scale_bbox    = bbox_extent
+        centroid_bbox = bbox_extent
+
 
     centroids = [g.centroid for g in normalized]
+    
+    # Precompute map-scale distances once
+    dx = (scale_bbox[2] - scale_bbox[0])
+    dy = (scale_bbox[3] - scale_bbox[1])
+    _map_diag = math.hypot(dx, dy)
+    _r05 = 0.05 * _map_diag
+    _r10 = 0.10 * _map_diag
 
-    # 3) Spatial index and prepared geoms (works for Shapely 1.x and 2.x)
+    # 3) Indexes …
     tree = STRtree(normalized)
     prepared = [prep(g) if (not g.is_empty and g.is_valid) else None for g in normalized]
-
-    # one-time geometry → index maps (work for geometry-object returns)
     id_map  = {id(g): k for k, g in enumerate(normalized)}
     wkb_map = {g.wkb: k for k, g in enumerate(normalized)}
 
     rows = []
     for i, geom in enumerate(normalized):
-        # Use largest part for MultiPolygon then buffer(0) to iron small defects.
-        if isinstance(geom, MultiPolygon):
-            try:
-                largest = max(geom.geoms, key=lambda p: p.area)
-            except ValueError:  # empty
-                largest = geom
-            base = largest.buffer(0)
-        else:
-            base = geom.buffer(0)
+        base = (max(geom.geoms, key=lambda p: p.area).buffer(0) if isinstance(geom, MultiPolygon) else geom.buffer(0))
 
-        feats = _polygon_features_single(base, bbox=bbox)
+        # 👉 centroids normalized by the SAME mode (extent or fixed width/height)
+        feats = _polygon_features_single(base, bbox=centroid_bbox)
 
-        if geom.is_empty or not geom.is_valid:
-            touch_candidates = []
-            inter_candidates = []
-            prep_geom = None
-        else:
-            # bbox hits (no predicate) + prepared geometry for fast pairwise checks
-            touch_candidates = tree.query(geom)
-            inter_candidates = touch_candidates  # reuse bbox hits
-            prep_geom = prepared[i]
+        # neighbors …
+        touch_candidates = tree.query(geom) if (not geom.is_empty and geom.is_valid) else []
+        inter_candidates = touch_candidates
+        prep_geom = prepared[i] if (not geom.is_empty and geom.is_valid) else None
 
-        # ----- robust scalar predicates -----
         def _safe_intersects(g1, g2, _prep=None) -> bool:
             if (g1.is_empty or not g1.is_valid) or (g2.is_empty or not g2.is_valid):
                 return False
@@ -379,23 +344,16 @@ def embed_polygons_handcrafted(
                 return False
 
         def _to_indices(cands, pred: str) -> List[int]:
-            """Convert STRtree results (indices or geoms) to indices; apply manual predicate if needed."""
             idxs: List[int] = []
-            size = getattr(cands, "size", None)
-            if (size == 0) or (size is None and len(cands) == 0):
+            if not cands:
                 return idxs
-            if geom.is_empty or not geom.is_valid:
-                return idxs
-
-            first = cands[0]
-
             def _accept(j: int) -> bool:
                 gj = normalized[j]
                 if gj.is_empty or not gj.is_valid:
                     return False
                 if pred == "touches":
                     return _safe_touches(geom, gj)
-                if pred in ("overlap", "intersects"):
+                if pred in ("overlap","intersects"):
                     hits = _safe_intersects(geom, gj, _prep=prep_geom)
                     if not hits:
                         return False
@@ -405,70 +363,74 @@ def embed_polygons_handcrafted(
                             and not geom.contains(gj)
                             and not geom.within(gj))
                 return False
-
-            if isinstance(first, (int, np.integer)):
-                for j in cands:
-                    j = int(j)
+            
+            if isinstance(cands[0], (int, np.integer)):
+                for j in map(int, cands):
                     if j != i and _accept(j):
                         idxs.append(j)
             else:
                 for g2 in cands:
-                    j = id_map.get(id(g2))
-                    if j is None:
-                        try:
-                            j = wkb_map.get(g2.wkb)
-                        except Exception:
-                            j = None
-                    if j is not None and j != i and _accept(j):
-                        idxs.append(j)
+                        j = id_map.get(id(g2))
+                        if j is None:
+                            try:
+                                wkb_key = g2.wkb if hasattr(g2, "wkb") else None
+                            except Exception:
+                                wkb_key = None
+                            if wkb_key is not None:
+                                j = wkb_map.get(wkb_key)
+                        if j is not None and j != i and _accept(j):
+                            idxs.append(j)
             return idxs
-
+        
         nbr_touch = _to_indices(touch_candidates, "touches")
-        nbr_inter = _to_indices(inter_candidates, "overlap")  # exclude pure-touch cases
+        nbr_inter = _to_indices(inter_candidates, "overlap")
+        nbr = list(set(nbr_touch + nbr_inter))  # union
 
-        # distances to neighbors (centroid to centroid)
-        dists = [centroids[i].distance(centroids[j]) for j in nbr_touch] if nbr_touch else []
+        def _mean_dist(idx_list):
+            return (sum(centroids[i].distance(centroids[j]) for j in idx_list) / len(idx_list)) if idx_list else 0.0
 
-        feats["nn_dist_min"]     = min(dists) if dists else 0.0
-        feats["nn_dist_median"]  = (sorted(dists)[len(dists)//2] if dists else 0.0)
-        feats["nn_dist_max"]     = max(dists) if dists else 0.0
+        # Mean over union (merged)
+        feats["mean_neighbor_distance"] = _mean_dist(nbr)
 
-        # kNN (within all polygons, not just touches)
+        # nn_* over union (fix guard to check `nbr`, not `nbr_touch`)
+        dists_union = [centroids[i].distance(centroids[j]) for j in nbr] if nbr else []
+        feats["nn_dist_min"]    = min(dists_union) if dists_union else 0.0
+        feats["nn_dist_median"] = (sorted(dists_union)[len(dists_union)//2] if dists_union else 0.0)
+        feats["nn_dist_max"]    = max(dists_union) if dists_union else 0.0
+
+        # KNN over all others
         all_d = sorted(centroids[i].distance(centroids[j]) for j in range(len(normalized)) if j != i)
         feats["knn1"] = all_d[0] if len(all_d) >= 1 else 0.0
         feats["knn2"] = all_d[1] if len(all_d) >= 2 else 0.0
         feats["knn3"] = all_d[2] if len(all_d) >= 3 else 0.0
-
-        # local density in radii proportional to map diagonal
-        dx = (bbox[2] - bbox[0]); dy = (bbox[3] - bbox[1])
-        diag = (dx*dx + dy*dy) ** 0.5
-        r05 = 0.05 * diag; r10 = 0.10 * diag
-        feats["density_r05"] = sum(1 for j in range(len(normalized)) if j != i and centroids[i].distance(centroids[j]) <= r05)
-        feats["density_r10"] = sum(1 for j in range(len(normalized)) if j != i and centroids[i].distance(centroids[j]) <= r10)
-
-        feats["neighbor_count_touches"] = len(nbr_touch)
-        feats["mean_neighbor_distance_touches"] = (
-            sum(centroids[i].distance(centroids[j]) for j in nbr_touch) / len(nbr_touch)
-            if nbr_touch else 0.0
+        
+        # densities (same mode), then normalize by denom
+        feats["density_r05"] = sum(
+            1 for j in range(len(normalized))
+            if j != i and centroids[i].distance(centroids[j]) <= _r05
+        )
+        feats["density_r10"] = sum(
+            1 for j in range(len(normalized))
+            if j != i and centroids[i].distance(centroids[j]) <= _r10
         )
 
-        feats["neighbor_count_intersects"] = len(nbr_inter)
-        feats["mean_neighbor_distance_intersects"] = (
-            sum(centroids[i].distance(centroids[j]) for j in nbr_inter) / len(nbr_inter)
-            if nbr_inter else 0.0
-        )
 
-        # Size-normalize counts/densities by (N-1)
-        N = float(len(normalized))
-        feats["neighbor_count_touches"]    = feats["neighbor_count_touches"] / max(N-1, 1.0)
-        feats["neighbor_count_intersects"] = feats["neighbor_count_intersects"] / max(N-1, 1.0)
-        feats["density_r05"]               = feats["density_r05"] / max(N-1, 1.0)
-        feats["density_r10"]               = feats["density_r10"] / max(N-1, 1.0)
+        # merged neighbor count → log-fraction in [0,1]
+        k_any = len(nbr)
+        if len(normalized) > 1:
+            denom = float(len(normalized) - 1)
+            feats["neighbor_count"] = math.log1p(k_any) / math.log1p(denom)
+        else:
+            feats["neighbor_count"] = 0.0
+            denom = 1.0
 
+        feats["density_r05"] /= denom
+        feats["density_r10"] /= denom
+        
+        # ✅ scale/normalize per-feature (unitless)
+        feats = _stabilize_polygon_feats(feats, bbox=scale_bbox)
+        
         feats["id"] = i + 1
-
-        # Final stabilization AFTER all features are present
-        feats = _stabilize_polygon_feats(feats, bbox=bbox)
         rows.append(feats)
 
     # 4) DataFrame + stable column order
