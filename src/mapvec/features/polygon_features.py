@@ -36,7 +36,6 @@ _NUMERIC_ORDER = [
     "convexity",
     "rectangularity",
     "neighbor_count",
-    "mean_neighbor_distance",
     "bbox_width",
     "bbox_height",
     "orient_sin",
@@ -45,20 +44,18 @@ _NUMERIC_ORDER = [
     "eccentricity",
     "has_hole",
     "reflex_ratio",
-    "nn_dist_min",
-    "nn_dist_median",
-    "nn_dist_max",
-    "knn1",
-    "knn2",
-    "knn3",
+    "nn_dist_median",  
+    "knn1",            
+    "knn3",            
     "density_r05",
     "density_r10",
 ]
 
+
 _BY_DIAG = [
-    "perimeter", "mean_neighbor_distance", "eq_diameter",
-    "nn_dist_min", "nn_dist_median", "nn_dist_max",
-    "knn1", "knn2", "knn3",
+    "perimeter", "eq_diameter",
+    "nn_dist_median",
+    "knn1", "knn3",
     "bbox_width", "bbox_height",
 ]
 
@@ -321,7 +318,7 @@ def embed_polygons_handcrafted(
         feats = _polygon_features_single(base, bbox=centroid_bbox)
 
         # neighbors …
-        touch_candidates = tree.query(geom) if (not geom.is_empty and geom.is_valid) else []
+        touch_candidates = list(tree.query(geom)) if (not geom.is_empty and geom.is_valid) else []
         inter_candidates = touch_candidates
         prep_geom = prepared[i] if (not geom.is_empty and geom.is_valid) else None
 
@@ -344,65 +341,69 @@ def embed_polygons_handcrafted(
                 return False
 
         def _to_indices(cands, pred: str) -> List[int]:
+            # normalize to list to avoid NumPy truthiness errors
+            if cands is None:
+                return []
+            cands = list(cands)
+            if len(cands) == 0:
+                return []
+
             idxs: List[int] = []
-            if not cands:
-                return idxs
             def _accept(j: int) -> bool:
                 gj = normalized[j]
-                if gj.is_empty or not gj.is_valid:
+                if gj.is_empty or not gj.is_valid: 
                     return False
-                if pred == "touches":
+                if pred == "touches": 
                     return _safe_touches(geom, gj)
                 if pred in ("overlap","intersects"):
                     hits = _safe_intersects(geom, gj, _prep=prep_geom)
-                    if not hits:
+                    if not hits: 
                         return False
-                    if pred == "intersects":
+                    if pred == "intersects": 
                         return True
                     return (not _safe_touches(geom, gj)
                             and not geom.contains(gj)
                             and not geom.within(gj))
                 return False
-            
+
+            # cands now a list; safe to look at first element
             if isinstance(cands[0], (int, np.integer)):
                 for j in map(int, cands):
                     if j != i and _accept(j):
                         idxs.append(j)
             else:
                 for g2 in cands:
-                        j = id_map.get(id(g2))
-                        if j is None:
-                            try:
-                                wkb_key = g2.wkb if hasattr(g2, "wkb") else None
-                            except Exception:
-                                wkb_key = None
-                            if wkb_key is not None:
-                                j = wkb_map.get(wkb_key)
-                        if j is not None and j != i and _accept(j):
-                            idxs.append(j)
+                    j = id_map.get(id(g2))
+                    if j is None:
+                        try:
+                            wkb_key = g2.wkb if hasattr(g2, "wkb") else None
+                        except Exception:
+                            wkb_key = None
+                        if wkb_key is not None:
+                            j = wkb_map.get(wkb_key)
+                    if j is not None and j != i and _accept(j):
+                        idxs.append(j)
             return idxs
-        
+
         nbr_touch = _to_indices(touch_candidates, "touches")
         nbr_inter = _to_indices(inter_candidates, "overlap")
         nbr = list(set(nbr_touch + nbr_inter))  # union
-
-        def _mean_dist(idx_list):
-            return (sum(centroids[i].distance(centroids[j]) for j in idx_list) / len(idx_list)) if idx_list else 0.0
-
-        # Mean over union (merged)
-        feats["mean_neighbor_distance"] = _mean_dist(nbr)
-
-        # nn_* over union (fix guard to check `nbr`, not `nbr_touch`)
+        
+        # Distances to union of neighbors (touch ∪ intersect)
         dists_union = [centroids[i].distance(centroids[j]) for j in nbr] if nbr else []
-        feats["nn_dist_min"]    = min(dists_union) if dists_union else 0.0
-        feats["nn_dist_median"] = (sorted(dists_union)[len(dists_union)//2] if dists_union else 0.0)
-        feats["nn_dist_max"]    = max(dists_union) if dists_union else 0.0
+        if dists_union:
+            s = sorted(dists_union)
+            n = len(s)
+            nn_median = 0.5 * (s[n//2 - 1] + s[n//2]) if n % 2 == 0 else s[n//2]
+        else:
+            nn_median = 0.0
+        feats["nn_dist_median"] = nn_median
+
 
         # KNN over all others
         all_d = sorted(centroids[i].distance(centroids[j]) for j in range(len(normalized)) if j != i)
         feats["knn1"] = all_d[0] if len(all_d) >= 1 else 0.0
-        feats["knn2"] = all_d[1] if len(all_d) >= 2 else 0.0
-        feats["knn3"] = all_d[2] if len(all_d) >= 3 else 0.0
+        feats["knn3"] = all_d[2] if len(all_d) >= 3 else (all_d[-1] if all_d else 0.0)
         
         # densities (same mode), then normalize by denom
         feats["density_r05"] = sum(
@@ -427,10 +428,9 @@ def embed_polygons_handcrafted(
         feats["density_r05"] /= denom
         feats["density_r10"] /= denom
         
-        # ✅ scale/normalize per-feature (unitless)
-        feats = _stabilize_polygon_feats(feats, bbox=scale_bbox)
-        
         feats["id"] = i + 1
+
+        feats = _stabilize_polygon_feats(feats, bbox=scale_bbox)
         rows.append(feats)
 
     # 4) DataFrame + stable column order
