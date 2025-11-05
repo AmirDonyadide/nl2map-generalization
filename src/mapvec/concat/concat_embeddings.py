@@ -47,6 +47,9 @@ def main():
     ap.add_argument("--fail_on_missing", action="store_true")
     ap.add_argument("--drop_dupes",      action="store_true")
     ap.add_argument("-v", "--verbose",   action="count", default=1)
+    ap.add_argument("--l2-prompt", action="store_true",help="L2-normalize prompt embeddings row-wise before concatenation.")
+    ap.add_argument("--save-blocks", action="store_true",help="Also save X_map.npy, X_prompt.npy, map_ids.npy, prompt_ids.npy.")
+
     args = ap.parse_args()
 
     setup_logging(args.verbose)
@@ -102,8 +105,8 @@ def main():
     for i, row in enumerate(pairs.itertuples(index=False), start=0):
         mid = row.map_id
         pid = row.prompt_id
-        im_opt = idx_map.get(mid) # type: ignore
-        ip_opt = idx_prm.get(pid) # type: ignore
+        im_opt = idx_map.get(mid)  # type: ignore
+        ip_opt = idx_prm.get(pid)  # type: ignore
         if im_opt is None or ip_opt is None:
             missing += 1
             if args.fail_on_missing:
@@ -120,18 +123,62 @@ def main():
     if missing:
         logging.warning("Skipped %d pairs with missing IDs (use --fail_on_missing to stop).", missing)
 
-    # row-wise concat (dimension-agnostic)
-    X_map = E_map[np.asarray(im_list, dtype=int)]
-    X_prm = E_prm[np.asarray(ip_list, dtype=int)]
-    X = np.hstack([X_map, X_prm]).astype(np.float32, copy=False)
+    sel_map_idx = np.asarray(im_list, dtype=int)
+    sel_prm_idx = np.asarray(ip_list, dtype=int)
+    X_map = E_map[sel_map_idx].astype(np.float32, copy=False)
+    X_prm = E_prm[sel_prm_idx].astype(np.float32, copy=False)
+    
+    if X_map.shape[1] == 0 or X_prm.shape[1] == 0:
+        logging.error("Zero-dimension map or prompt block. map_dim=%d, prompt_dim=%d",
+                  X_map.shape[1], X_prm.shape[1])
+        sys.exit(3)
 
-    # --- save artifacts
+
+    # --- OPTIONAL: prompt L2 normalize (safety if upstream --l2 was not used)
+    def _l2_rows(A: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+        n = np.sqrt((A * A).sum(axis=1, keepdims=True))
+        return A / np.maximum(n, eps)
+
+    # add CLI flag
+    # ap.add_argument("--l2-prompt", action="store_true")
+    if getattr(args, "l2_prompt", False):
+        X_prm = _l2_rows(X_prm)
+
+    # --- save concatenated and (optionally) separate blocks
+    X = np.hstack([X_map, X_prm]).astype(np.float32, copy=False)
     np.save(out_dir / "X_concat.npy", X)
 
+    if args.save_blocks:  # <-- wrap with the flag
+        np.save(out_dir / "X_map.npy",    X_map)
+        np.save(out_dir / "X_prompt.npy", X_prm)
+        np.save(out_dir / "map_ids.npy",  np.asarray([map_ids[i] for i in sel_map_idx], dtype=object))
+        np.save(out_dir / "prompt_ids.npy", np.asarray([prm_ids[i] for i in sel_prm_idx], dtype=object))
+
+
+    # --- joined pairs parquet (unchanged)
     join_df = pairs.iloc[chosen_rows].reset_index(drop=True)
     cols = [c for c in join_df.columns if c not in ("map_id", "prompt_id")]
     join_df = join_df[["map_id", "prompt_id", *cols]]
+    # after join_df is built, before saving files:
+    assert X.shape[0] == len(join_df), "Row count mismatch between X and join_df."
+
     join_df.to_parquet(out_dir / "train_pairs.parquet", index=False)
+
+    # --- simple sanity checks
+    if not np.isfinite(X).all():
+        logging.warning("X contains non-finite values (NaN/Inf). Downstream imputer should handle this.")
+
+    outputs = {
+        "X_concat_npy": "X_concat.npy",
+        "train_pairs_parquet": "train_pairs.parquet",
+    }
+    if args.save_blocks:
+        outputs.update({
+            "X_map_npy": "X_map.npy",
+            "X_prompt_npy": "X_prompt.npy",
+            "map_ids_npy": "map_ids.npy",
+            "prompt_ids_npy": "prompt_ids.npy",
+        })
 
     meta = {
         "shape": [int(X.shape[0]), int(X.shape[1])],
@@ -144,14 +191,24 @@ def main():
             "map_npz": str(map_npz_path),
             "prompt_npz": str(prm_npz_path),
         },
-        "outputs": {
-            "X_concat_npy": "X_concat.npy",
-            "train_pairs_parquet": "train_pairs.parquet",
+        "outputs": outputs,
+        "options": {
+            "l2_prompt": bool(args.l2_prompt),
+            "drop_dupes": bool(args.drop_dupes),
+            "fail_on_missing": bool(args.fail_on_missing),
+            "save_blocks": bool(args.save_blocks),
+        },
+        # small preview helps debugging without dumping everything
+        "preview_ids": {
+            "map_ids":    [map_ids[i] for i in sel_map_idx[:10]],
+            "prompt_ids": [prm_ids[i] for i in sel_prm_idx[:10]],
         },
     }
+
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     logging.info("X shape = %s  (map_dim=%d, prompt_dim=%d)", X.shape, E_map.shape[1], E_prm.shape[1])
     logging.info("Saved to %s in %.2fs", out_dir, time.time() - t0)
+
 
 if __name__ == "__main__":
     main()

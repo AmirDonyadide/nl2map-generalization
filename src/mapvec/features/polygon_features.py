@@ -49,6 +49,7 @@ _NUMERIC_ORDER = [
     "knn3",            
     "density_r05",
     "density_r10",
+    "extent_fill",
 ]
 
 
@@ -76,9 +77,9 @@ def _stabilize_polygon_feats(feats: dict, bbox) -> dict:
         feats["area"] = float(feats["area"]) / bbox_area
 
     # map orientation components from [-1,1] to [0,1]
-    for k in ("orient_sin", "orient_cos"):
-        if k in feats and np.isfinite(feats[k]):
-            feats[k] = 0.5 * (feats[k] + 1.0)
+    #for k in ("orient_sin", "orient_cos"):
+    #    if k in feats and np.isfinite(feats[k]):
+    #        feats[k] = 0.5 * (feats[k] + 1.0)
 
     return feats
 
@@ -179,6 +180,8 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
     bw = max(poly.bounds[2] - poly.bounds[0], 1e-12)
     bh = max(poly.bounds[3] - poly.bounds[1], 1e-12)
 
+    extent_fill = min(1.0, float(area / (bw * bh)))
+    
     # orientation from the long edge of the MRR
     mrr_coords = list(mrr.exterior.coords)     # type: ignore
     best_len, best_ang = 0.0, 0.0
@@ -240,6 +243,7 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         "eccentricity": eccentricity,
         "has_hole": has_hole,
         "reflex_ratio": reflex_ratio,
+        "extent_fill": extent_fill,
     }
 
 def embed_polygons_handcrafted(

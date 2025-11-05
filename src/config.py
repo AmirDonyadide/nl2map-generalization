@@ -90,7 +90,7 @@ class ModelConfig:
     USE_MODEL: str = os.getenv("USE_MODEL", "dan")  # 'dan' or 'transformer'
 
     # --- FIXED DIMENSIONS ---
-    MAP_DIM: int = 249
+    MAP_DIM: int = 165
     PROMPT_DIM: int = 512
     FUSED_DIM: int = MAP_DIM + PROMPT_DIM  # 761
 

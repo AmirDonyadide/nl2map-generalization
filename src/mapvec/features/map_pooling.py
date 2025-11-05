@@ -60,9 +60,9 @@ def pool_map_embedding(
     if quantiles and F.size:
         q = np.array(list(quantiles), dtype=float)
         try:
-            Q = np.nanquantile(F, q=q, axis=0, method="linear")  # NumPy ≥ 1.22
+            Q = np.nanquantile(F, q=q, axis=0, method="linear")
         except TypeError:
-            Q = np.nanquantile(F, q=q, axis=0, interpolation="linear")  # older NumPy #type: ignore
+            Q = np.nanquantile(F, q=q, axis=0, interpolation="linear") #type: ignore
         for qq, row in zip(quantiles, Q):
             parts.append(row)
             names += [f"{c}__q{int(round(qq*100))}" for c in feat_cols]
@@ -84,15 +84,25 @@ def pool_map_embedding(
                 miny = float(np.nanmin(cy)); maxy = float(np.nanmax(cy))
                 spread_w = max(maxx - minx, 0.0)          # fraction in [0,1]
                 spread_h = max(maxy - miny, 0.0)          # fraction in [0,1]
-                spread_aspect = (spread_w / max(spread_h, 1e-12)) if spread_h > 0 else 0.0
             else:
-                spread_w = spread_h = spread_aspect = 0.0
+                spread_w = spread_h = 0.0
         else:
-            spread_w = spread_h = spread_aspect = 0.0
-            
-        spread_aspect = np.log1p(spread_aspect)
-        parts.append(np.array([N_norm, spread_w, spread_h, spread_aspect], dtype=float))
-        names += ["poly_count", "poly_spread_w", "poly_spread_h", "poly_spread_aspect"]
+            spread_w = spread_h = 0.0
+        
+        # --- coverage ratio (Σ normalized polygon areas / map area) ---
+        area_ser = df_polys.get("area")
+        if area_ser is None:
+            area_ser = pd.Series(dtype=float)
+
+        # explicitly tell type checker it's a Series[float]
+        area_norm: pd.Series = pd.to_numeric(area_ser, errors="coerce")
+        coverage_ratio = float(np.nansum(area_norm))
+        coverage_ratio = max(0.0, min(1.0, coverage_ratio))  # clamp to [0,1]
+
+
+        parts.append(np.array([N_norm, spread_w, spread_h, coverage_ratio], dtype=float))
+        names += ["poly_count", "poly_spread_w", "poly_spread_h", "coverage_ratio"]
+
 
     # --- finalize ---
     if parts:
