@@ -1,5 +1,5 @@
 # prompt_embeddings.py
-# Embed prompts (CSV/TXT) with USE-DAN/Transformer and save artifacts.
+# Embed prompts (CSV/TXT) with USE-DAN/Transformer or OpenAI LLM embeddings and save artifacts.
 # Default I/O lives under the project ./data folder (at repo root, not inside src/).
 
 from __future__ import annotations
@@ -9,13 +9,18 @@ import time
 import json
 import argparse
 import logging
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Callable
 from pathlib import Path
 import shutil
 
 import numpy as np
 import pandas as pd
-import tensorflow_hub as hub
+
+# --- TF Hub is optional now (only needed for USE)  # === NEW
+try:
+    import tensorflow_hub as hub  # type: ignore
+except Exception:  # pragma: no cover
+    hub = None
 
 # ----------------------- project/data discovery -----------------------
 def find_project_root(start: Path) -> Path:
@@ -49,13 +54,13 @@ def setup_logging(verbosity: int = 1):
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%H:%M:%S",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     logging.debug("FILE_DIR=%s", FILE_DIR)
     logging.debug("PROJECT_ROOT=%s", PROJECT_ROOT)
     logging.debug("DEFAULT_DATA_DIR=%s", DEFAULT_DATA_DIR)
 
-# ----------------------- Model discovery & loader -----------------------
+# ----------------------- Model discovery & loader (USE) -----------------------
 # Kaggle Models IDs for TF2 variants (public, same models TF-Hub points to)
 _KAGGLE_MODEL_IDS = {
     "dan": "google/universal-sentence-encoder/tensorFlow2/universal-sentence-encoder/2",
@@ -85,7 +90,7 @@ def _copy_into(dst: Path, src: Path):
 
 def _download_with_kagglehub(which: str) -> Optional[Path]:
     """
-    Downloads the model via kagglehub and returns the local path to the SavedModel.
+    Downloads the USE model via kagglehub and returns the local path to the SavedModel.
     Returns None on failure.
     """
     try:
@@ -121,7 +126,13 @@ def ensure_local_use_model(which: str, dest_dir: Path) -> Path:
     """
     which = which.lower()
     if which not in ("dan", "transformer"):
-        raise ValueError("Unknown model. Choose 'dan' or 'transformer'.")
+        raise ValueError("Unknown USE model. Choose 'dan' or 'transformer'.")
+
+    if hub is None:  # === NEW
+        raise RuntimeError(
+            "tensorflow_hub is not available but a USE model was requested. "
+            "Install tensorflow and tensorflow_hub, or choose an OpenAI model."
+        )
 
     # 1) Already present?
     if _has_saved_model(dest_dir):
@@ -129,12 +140,12 @@ def ensure_local_use_model(which: str, dest_dir: Path) -> Path:
         return dest_dir
 
     # 2) Attempt to download
-    logging.info("Local model not found at %s. Attempting download…", dest_dir)
+    logging.info("Local USE model not found at %s. Attempting download…", dest_dir)
     dl_path = _download_with_kagglehub(which)
     if dl_path is None:
         # Give a clear, actionable message
         raise RuntimeError(
-            "Could not download the model automatically.\n"
+            "Could not download the USE model automatically.\n"
             "Options:\n"
             f"  A) Install kagglehub and try again:  pip install kagglehub\n"
             f"  B) Manually place the unpacked SavedModel under: {dest_dir}\n"
@@ -146,23 +157,23 @@ def ensure_local_use_model(which: str, dest_dir: Path) -> Path:
     if not _has_saved_model(dest_dir):
         raise RuntimeError(f"Model copy failed; SavedModel not found under {dest_dir}")
 
-    logging.info("Model ready at %s", dest_dir)
+    logging.info("USE model ready at %s", dest_dir)
     return dest_dir
 
 def load_use_local_or_download(which: str, data_dir: Path):
     """
-    Resolves a local path for the model (data/input/model_*) and loads it with hub.load.
+    Resolves a local path for the USE model (data/input/model_*) and loads it with hub.load.
     If missing, downloads via kagglehub, installs it into that path, and loads.
     """
     dest_dir = _default_model_dir(data_dir, which)
     ready_dir = ensure_local_use_model(which, dest_dir)
     t0 = time.time()
     logging.info("Loading USE-%s from local path: %s …", which, ready_dir)
-    model = hub.load(str(ready_dir))
-    logging.info("Model loaded in %.2fs", time.time() - t0)
+    model = hub.load(str(ready_dir))  # type: ignore[arg-type]
+    logging.info("USE model loaded in %.2fs", time.time() - t0)
     return model
 
-# ----------------------- Embedding helpers -----------------------
+# ----------------------- Embedding helpers (common) -----------------------
 def _sanitize_texts(texts: List[str]) -> List[str]:
     cleaned = []
     for i, t in enumerate(texts):
@@ -174,14 +185,16 @@ def _sanitize_texts(texts: List[str]) -> List[str]:
         cleaned.append(s)
     return cleaned
 
-def embed_texts(model, texts: List[str], l2_normalize: bool = True, batch_size: int = 512) -> np.ndarray:
-    """Embeds a list of strings with optional batching. Returns (N, D) float32."""
+def embed_texts_use(model, texts: List[str], l2_normalize: bool = True,
+                    batch_size: int = 512) -> np.ndarray:
+    """Embeds a list of strings with USE. Returns (N, D) float32."""
     texts = _sanitize_texts(texts)
     n = len(texts)
     if n == 0:
         raise ValueError("No prompts to embed (after cleaning).")
 
-    logging.info("Embedding %d prompts (batch_size=%d, l2=%s)…", n, batch_size, l2_normalize)
+    logging.info("Embedding %d prompts with USE (batch_size=%d, l2=%s)…",
+                 n, batch_size, l2_normalize)
     t0 = time.time()
 
     probe = model([texts[0]]).numpy().astype(np.float32)
@@ -194,14 +207,114 @@ def embed_texts(model, texts: List[str], l2_normalize: bool = True, batch_size: 
         end = min(start + batch_size, n)
         batch = texts[start:end]
         E[start:end] = model(batch).numpy().astype(np.float32)
-        logging.debug("  embedded rows [%d:%d)", start, end)
+        logging.debug("  USE embedded rows [%d:%d)", start, end)
         start = end
 
     if l2_normalize:
         E /= (np.linalg.norm(E, axis=1, keepdims=True) + 1e-12)
 
-    logging.info("Done embedding in %.2fs (dim=%d).", time.time() - t0, dim)
+    logging.info("Done USE embedding in %.2fs (dim=%d).", time.time() - t0, dim)
     return E
+
+# ----------------------- OpenAI LLM embedding helpers  # === NEW -----------------------
+def embed_texts_openai(model_name: str,
+                       texts: List[str],
+                       l2_normalize: bool = True,
+                       batch_size: int = 256) -> np.ndarray:
+    """
+    Embed texts with an OpenAI embedding model (e.g. text-embedding-3-small).
+    Returns (N, D) float32.
+    """
+    from openai import OpenAI  # imported lazily so it's optional
+    client = OpenAI()  # uses OPENAI_API_KEY from env
+
+    texts = _sanitize_texts(texts)
+    n = len(texts)
+    if n == 0:
+        raise ValueError("No prompts to embed (after cleaning).")
+
+    logging.info("Embedding %d prompts with OpenAI model=%s (batch_size=%d, l2=%s)…",
+                 n, model_name, batch_size, l2_normalize)
+    t0 = time.time()
+
+    all_vecs: List[np.ndarray] = []
+
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        batch = texts[start:end]
+
+        # Optional domain context – you can adjust or remove this line:
+        batch_ctx = [f"Cartographic map generalization instruction: {t}" for t in batch]
+
+        resp = client.embeddings.create(
+            model=model_name,
+            input=batch_ctx,
+        )
+
+        # resp.data is a list of objects with .embedding
+        vecs = np.array([d.embedding for d in resp.data], dtype=np.float32)
+        all_vecs.append(vecs)
+        logging.debug("  OpenAI embedded rows [%d:%d)", start, end)
+
+    E = np.vstack(all_vecs).astype(np.float32)
+
+    if l2_normalize:
+        E /= (np.linalg.norm(E, axis=1, keepdims=True) + 1e-12)
+
+    logging.info("Done OpenAI embedding in %.2fs (dim=%d).",
+                 time.time() - t0, E.shape[1])
+    return E
+
+# ----------------------- Backend selector  # === NEW -----------------------
+def get_embedder(
+    kind: str,
+    data_dir: Path,
+    l2_normalize: bool,
+    batch_size: int,
+) -> Tuple[Callable[[List[str]], np.ndarray], str]:
+    """
+    Returns (embed_fn, model_label) for the requested backend.
+    - embed_fn(texts) -> np.ndarray[N, D]
+    - model_label: human-readable name stored in meta.json
+    """
+    kind = kind.lower()
+
+    if kind in ("dan", "transformer"):
+        # USE backend
+        use_model = load_use_local_or_download(kind, data_dir)
+
+        def embed_fn(texts: List[str]) -> np.ndarray:
+            return embed_texts_use(
+                use_model,
+                texts,
+                l2_normalize=l2_normalize,
+                batch_size=batch_size,
+            )
+
+        model_label = f"USE-{kind}"
+        return embed_fn, model_label
+
+    # OpenAI backends
+    if kind == "openai-small":
+        model_name = "text-embedding-3-small"
+    elif kind == "openai-large":
+        model_name = "text-embedding-3-large"
+    else:
+        raise ValueError(
+            f"Unknown model kind '{kind}'. "
+            "Use one of: dan, transformer, openai-small, openai-large."
+        )
+
+    def embed_fn(texts: List[str]) -> np.ndarray:
+        return embed_texts_openai(
+            model_name=model_name,
+            texts=texts,
+            l2_normalize=l2_normalize,
+            batch_size=batch_size,
+        )
+
+    model_label = f"OpenAI-{model_name}"
+    return embed_fn, model_label
 
 # ----------------------- I/O helpers -----------------------
 def load_prompts_from_source(input_path: Path) -> Tuple[List[str], List[str], str]:
@@ -289,7 +402,7 @@ def save_outputs(
         csv_name = csv_path.name
 
     meta = {
-        "model": f"USE-{model_name}",
+        "model": model_name,  # no longer hard-coded "USE-" prefix  # === NEW
         "dim": int(E.shape[1]),
         "count": int(E.shape[0]),
         "l2_normalized": bool(l2_normalized),
@@ -304,31 +417,68 @@ def save_outputs(
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     logging.info("  saved %s", meta_path.name)
 
-
 # ----------------------- CLI -----------------------
 def main():
-    parser = argparse.ArgumentParser(description="Embed prompts with USE and save artifacts.")
-    parser.add_argument("--input", type=str,
-                        default=None,
-                        help="Path to .txt (one per line) or .csv with columns prompt_id,text (or id,text). "
-                             "Default: <data_dir>/prompts.csv")
-    parser.add_argument("--data_dir", type=str,
-                        default=str(DEFAULT_DATA_DIR),
-                        help="Directory that holds inputs/outputs (default: auto-detected project data dir). "
-                             "Env override: MAPVEC_DATA_DIR")
-    parser.add_argument("--model", type=str, default="dan", choices=["dan", "transformer"],
-                        help="USE variant.")
-    parser.add_argument("--l2", action="store_true",
-                        help="L2-normalize embeddings (recommended).")
-    parser.add_argument("--out_dir", type=str,
-                        default=None,
-                        help="Output directory (default: <data_dir>/prompt_out).")
-    parser.add_argument("--embeddings_csv", action="store_true",
-                        help="Also save a wide embeddings.csv with columns prompt_id,e0000..eXXXX.")
-    parser.add_argument("--batch_size", type=int, default=512,
-                        help="Batch size for embedding calls.")
-    parser.add_argument("-v", "--verbose", action="count", default=1,
-                        help="Increase verbosity (-v, -vv).")
+    parser = argparse.ArgumentParser(
+        description="Embed prompts with USE or OpenAI embeddings and save artifacts."
+    )
+    parser.add_argument(
+        "--input",
+        type=str,
+        default=None,
+        help=(
+            "Path to .txt (one per line) or .csv with columns prompt_id,text (or id,text). "
+            "Default: <data_dir>/prompts.csv"
+        ),
+    )
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default=str(DEFAULT_DATA_DIR),
+        help=(
+            "Directory that holds inputs/outputs (default: auto-detected project data dir). "
+            "Env override: MAPVEC_DATA_DIR"
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="dan",
+        choices=["dan", "transformer", "openai-small", "openai-large"],  # === NEW
+        help=(
+            "Prompt encoder backend: "
+            "dan/transformer = USE; openai-small/openai-large = OpenAI embedding models."
+        ),
+    )
+    parser.add_argument(
+        "--l2",
+        action="store_true",
+        help="L2-normalize embeddings (recommended).",
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default=None,
+        help="Output directory (default: <data_dir>/output/prompt_out).",
+    )
+    parser.add_argument(
+        "--embeddings_csv",
+        action="store_true",
+        help="Also save a wide embeddings.csv with columns prompt_id,e0000..eXXXX.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=512,
+        help="Batch size for embedding calls.",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=1,
+        help="Increase verbosity (-v, -vv).",
+    )
     args = parser.parse_args()
 
     setup_logging(args.verbose)
@@ -348,20 +498,29 @@ def main():
 
     try:
         ids, texts, id_colname = load_prompts_from_source(in_path)
-        logging.info("Loaded %d prompts (id_col=%s). Sample IDs: %s",
-                     len(ids), id_colname, ", ".join(ids[:3]) + ("…" if len(ids) > 3 else ""))
+        logging.info(
+            "Loaded %d prompts (id_col=%s). Sample IDs: %s",
+            len(ids),
+            id_colname,
+            ", ".join(ids[:3]) + ("…" if len(ids) > 3 else ""),
+        )
 
-        # NEW: local-first, download-if-missing
-        model = load_use_local_or_download(args.model, data_dir)
+        # Backend selection (USE or OpenAI)  # === NEW
+        embed_fn, model_label = get_embedder(
+            kind=args.model,
+            data_dir=data_dir,
+            l2_normalize=args.l2,
+            batch_size=args.batch_size,
+        )
 
-        E = embed_texts(model, texts, l2_normalize=args.l2, batch_size=args.batch_size)
+        E = embed_fn(texts)
 
         save_outputs(
             out_dir=out_dir,
             ids=ids,
             texts=texts,
             E=E,
-            model_name=args.model,
+            model_name=model_label,
             l2_normalized=args.l2,
             id_colname=id_colname if id_colname in ("prompt_id", "id") else "prompt_id",
             also_save_embeddings_csv=args.embeddings_csv,
@@ -374,3 +533,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+# ----------------------- End of File -----------------------
