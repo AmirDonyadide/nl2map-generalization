@@ -83,16 +83,26 @@ class ProjectPaths:
             d.mkdir(parents=True, exist_ok=True)
         print("✅ All output folders cleaned and recreated fresh.\n")
 
-
 @dataclass(frozen=True)
 class ModelConfig:
-    # Prompt encoder
-    USE_MODEL: str = os.getenv("USE_MODEL", "dan")  # 'dan' or 'transformer'
+    """
+    Model hyper-parameters and prompt encoder config.
 
-    # --- FIXED DIMENSIONS ---
-    MAP_DIM: int = 165
-    PROMPT_DIM: int = 512
-    FUSED_DIM: int = MAP_DIM + PROMPT_DIM  # 761
+    PROMPT_ENCODER:
+      - 'dan', 'transformer'  → USE variants
+      - 'openai-small', 'openai-large', etc. → LLM embeddings
+      - or any other string you use in prompt_embeddings.py --model
+    """
+    # Prompt encoder name (generic, not just USE)
+    PROMPT_ENCODER: str = "openai-small"
+    #PROMPT_ENCODER: str = "dan"
+
+    # Dimensions (can be overridden by env or inferred later)
+    MAP_DIM: int = int(os.getenv("MAP_DIM", "165"))
+    PROMPT_DIM: int = int(os.getenv("PROMPT_DIM", "512"))
+
+    # Will be set in __post_init__
+    FUSED_DIM: int = 0
 
     # Training
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "512"))
@@ -102,6 +112,11 @@ class ModelConfig:
     TEST_RATIO: float = float(os.getenv("TEST_RATIO", "0.15"))
     SEED: int = int(os.getenv("SEED", "42"))
 
+    def __post_init__(self):
+        # Keep FUSED_DIM consistent with MAP_DIM and PROMPT_DIM
+        object.__setattr__(self, "FUSED_DIM", self.MAP_DIM + self.PROMPT_DIM)
+
+
 
 
 # --------------------------- public API ------------------------
@@ -109,9 +124,14 @@ class ModelConfig:
 # Instantiate paths, ensure outputs exist
 PATHS = ProjectPaths().ensure_outputs()
 
-# Create a model config; if you want to pin dims, set them here:
-# e.g., ModelConfig(MAP_DIM=996, PROMPT_DIM=512)
-CFG = ModelConfig()
+# Try to infer PROMPT_DIM from existing embeddings, if available
+_, inferred_prm_dim = try_infer_dims(PATHS.PRM_NPZ)
+
+if inferred_prm_dim is not None:
+    CFG = ModelConfig(PROMPT_DIM=inferred_prm_dim)
+else:
+    CFG = ModelConfig()
+
 
 # Optional: quick sanity warnings (no hard failure)
 def print_summary():
@@ -131,10 +151,10 @@ def print_summary():
     print("SPLIT_OUT  :", PATHS.SPLIT_OUT)
     print("PRM_NPZ    :", PATHS.PRM_NPZ)
     print("--- Model ---")
-    print("USE_MODEL  :", CFG.USE_MODEL)
-    print("MAP_DIM    :", CFG.MAP_DIM)
-    print("PROMPT_DIM :", CFG.PROMPT_DIM)
-    print("FUSED_DIM  :", CFG.FUSED_DIM)
+    print("PROMPT_ENCODER:", CFG.PROMPT_ENCODER)
+    print("MAP_DIM       :", CFG.MAP_DIM)
+    print("PROMPT_DIM    :", CFG.PROMPT_DIM)
+    print("FUSED_DIM     :", CFG.FUSED_DIM)
     print("BATCH_SIZE :", CFG.BATCH_SIZE)
     print("VAL/TEST   :", CFG.VAL_RATIO, CFG.TEST_RATIO)
     print("SEED       :", CFG.SEED)

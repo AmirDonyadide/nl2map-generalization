@@ -15,6 +15,7 @@ import shutil
 
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 
 # --- TF Hub is optional now (only needed for USE)  # === NEW
 try:
@@ -39,6 +40,7 @@ def find_project_root(start: Path) -> Path:
 
 FILE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = find_project_root(FILE_DIR)
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
 
 def get_default_data_dir() -> Path:
     env = os.environ.get("MAPVEC_DATA_DIR")
@@ -226,7 +228,16 @@ def embed_texts_openai(model_name: str,
     Returns (N, D) float32.
     """
     from openai import OpenAI  # imported lazily so it's optional
-    client = OpenAI()  # uses OPENAI_API_KEY from env
+    
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY not set. "
+            "Create a .env file with your key. Example:\n"
+            "OPENAI_API_KEY=sk-xxxx"
+        )
+        
+    client = OpenAI(api_key=api_key)  # uses OPENAI_API_KEY from env
 
     texts = _sanitize_texts(texts)
     n = len(texts)
