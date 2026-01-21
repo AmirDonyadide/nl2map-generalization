@@ -33,6 +33,15 @@ def try_infer_dims(prompt_npz: Path) -> Tuple[Optional[int], Optional[int]]:
         pass
     return None, None
 
+
+def env_bool(key: str, default: bool = False) -> bool:
+    """Parse common truthy/falsey env values."""
+    val = os.getenv(key)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
 # --------------------------- config ----------------------------
 
 @dataclass(frozen=True)
@@ -45,28 +54,76 @@ class ProjectPaths:
     INPUT_DIR: Path = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "input")
     OUTPUT_DIR: Path = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "output")
 
-    # Inputs
-    PROMPTS_CSV: Path = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "input" / "prompts.csv")  # columns: prompt_id,text
-    PAIRS_CSV: Path   = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "input" / "pairs.csv")    # columns: map_id,prompt_id
-    MAPS_ROOT: Path   = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "input" / "samples" / "pairs")
+    # ----------------------- Inputs (User Study Excel) -----------------------
+    USER_STUDY_XLSX: Path = (
+        Path(os.getenv("PROJ_ROOT", "../")).resolve()
+        / "data" / "userstudy" / "UserStudy.xlsx"
+    )
+
+    # Excel sheet name
+    RESPONSES_SHEET: str = os.getenv("RESPONSES_SHEET", "Responses")
+
+    # Required columns inside the Responses sheet
+    TILE_ID_COL: str = os.getenv("TILE_ID_COL", "tile_id")        # number
+    COMPLETE_COL: str = os.getenv("COMPLETE_COL", "complete")      # True / False
+    REMOVE_COL: str = os.getenv("REMOVE_COL", "remove")            # True / False
+    TEXT_COL: str = os.getenv("TEXT_COL", "cleaned_text")          # text
+    PARAM_VALUE_COL: str = os.getenv("PARAM_VALUE_COL", "param_value")  # float
+    OPERATOR_COL: str = os.getenv("OPERATOR_COL", "operator")           # text
+    INTENSITY_COL: str = os.getenv("INTENSITY_COL", "intensity")        # text
+
+    # Training inclusion filters (keep consistent across scripts)
+    ONLY_COMPLETE: bool = env_bool("ONLY_COMPLETE", True)       # keep only complete==True
+    EXCLUDE_REMOVED: bool = env_bool("EXCLUDE_REMOVED", True)   # keep only remove==False
+
+    # Prompt ID scheme (must match prompt_embeddings + concat)
+    PROMPT_ID_PREFIX: str = os.getenv("PROMPT_ID_PREFIX", "r")
+    PROMPT_ID_WIDTH: int = int(os.getenv("PROMPT_ID_WIDTH", "8"))
+
+    # Split strategy (avoid leakage!)
+    # Recommended: 'tile' means group split by TILE_ID_COL.
+    SPLIT_BY: str = os.getenv("SPLIT_BY", "tile")  # 'tile' or 'row'
+
+    # ----------------------- Map inputs -----------------------
+    MAPS_ROOT: Path = (
+        Path(os.getenv("PROJ_ROOT", "../")).resolve()
+        / "data" / "input" / "samples" / "pairs"
+    )
 
     # File patterns
     INPUT_MAPS_PATTERN: str = os.getenv("INPUT_MAPS_PATTERN", "*_input.geojson")
 
-    # Outputs
-    PROMPT_OUT: Path = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "output" / "prompt_out")
-    MAP_OUT: Path    = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "output" / "map_out")
-    TRAIN_OUT: Path  = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "output" / "train_out")
-    MODEL_OUT: Path  = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "output" / "models")
-    SPLIT_OUT: Path  = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "output" / "train_out" / "splits")
+    # ----------------------- Outputs -----------------------
+    PROMPT_OUT: Path = (
+        Path(os.getenv("PROJ_ROOT", "../")).resolve()
+        / "data" / "output" / "prompt_out"
+    )
+    MAP_OUT: Path = (
+        Path(os.getenv("PROJ_ROOT", "../")).resolve()
+        / "data" / "output" / "map_out"
+    )
+    TRAIN_OUT: Path = (
+        Path(os.getenv("PROJ_ROOT", "../")).resolve()
+        / "data" / "output" / "train_out"
+    )
+    MODEL_OUT: Path = (
+        Path(os.getenv("PROJ_ROOT", "../")).resolve()
+        / "data" / "output" / "models"
+    )
+    SPLIT_OUT: Path = (
+        Path(os.getenv("PROJ_ROOT", "../")).resolve()
+        / "data" / "output" / "train_out" / "splits"
+    )
 
     # Precomputed embeddings
-    PRM_NPZ: Path    = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "output" / "prompt_out" / "prompts_embeddings.npz")
+    PRM_NPZ: Path = (
+        Path(os.getenv("PROJ_ROOT", "../")).resolve()
+        / "data" / "output" / "prompt_out" / "prompts_embeddings.npz"
+    )
 
     # -------------------------------------------------------------
     def ensure_outputs(self) -> "ProjectPaths":
         """Create output directories if missing."""
-        from pathlib import Path
         from os import makedirs
         makedirs(self.OUTPUT_DIR, exist_ok=True)
         for p in (self.PROMPT_OUT, self.MAP_OUT, self.TRAIN_OUT, self.MODEL_OUT, self.SPLIT_OUT):
@@ -83,6 +140,7 @@ class ProjectPaths:
             d.mkdir(parents=True, exist_ok=True)
         print("✅ All output folders cleaned and recreated fresh.\n")
 
+
 @dataclass(frozen=True)
 class ModelConfig:
     """
@@ -95,7 +153,7 @@ class ModelConfig:
     """
     # Prompt encoder name (generic, not just USE)
     PROMPT_ENCODER: str = "openai-small"
-    #PROMPT_ENCODER: str = "dan"
+    # PROMPT_ENCODER: str = "dan"
 
     # Dimensions (can be overridden by env or inferred later)
     MAP_DIM: int = int(os.getenv("MAP_DIM", "165"))
@@ -113,27 +171,21 @@ class ModelConfig:
     SEED: int = int(os.getenv("SEED", "42"))
 
     def __post_init__(self):
-        # Keep FUSED_DIM consistent with MAP_DIM and PROMPT_DIM
         object.__setattr__(self, "FUSED_DIM", self.MAP_DIM + self.PROMPT_DIM)
-
-
 
 
 # --------------------------- public API ------------------------
 
-# Instantiate paths, ensure outputs exist
 PATHS = ProjectPaths().ensure_outputs()
 
 # Try to infer PROMPT_DIM from existing embeddings, if available
 _, inferred_prm_dim = try_infer_dims(PATHS.PRM_NPZ)
-
 if inferred_prm_dim is not None:
     CFG = ModelConfig(PROMPT_DIM=inferred_prm_dim)
 else:
     CFG = ModelConfig()
 
 
-# Optional: quick sanity warnings (no hard failure)
 def print_summary():
     print("=== CONFIG SUMMARY ===")
     print("PROJ_ROOT  :", PATHS.PROJ_ROOT)
@@ -142,19 +194,37 @@ def print_summary():
     print("OUTPUT_DIR :", PATHS.OUTPUT_DIR)
     print("MAPS_ROOT  :", PATHS.MAPS_ROOT)
     print("INPUT PAT. :", PATHS.INPUT_MAPS_PATTERN)
-    print("PROMPTS_CSV:", PATHS.PROMPTS_CSV)
-    print("PAIRS_CSV  :", PATHS.PAIRS_CSV)
+
+    print("--- User Study ---")
+    print("USER_STUDY_XLSX :", PATHS.USER_STUDY_XLSX)
+    print("RESPONSES_SHEET :", PATHS.RESPONSES_SHEET)
+    print("TILE_ID_COL     :", PATHS.TILE_ID_COL)
+    print("COMPLETE_COL    :", PATHS.COMPLETE_COL)
+    print("REMOVE_COL      :", PATHS.REMOVE_COL)
+    print("TEXT_COL        :", PATHS.TEXT_COL)
+    print("PARAM_VALUE_COL :", PATHS.PARAM_VALUE_COL)
+    print("OPERATOR_COL    :", PATHS.OPERATOR_COL)
+    print("INTENSITY_COL   :", PATHS.INTENSITY_COL)
+
+    print("--- Filters / IDs / Split ---")
+    print("ONLY_COMPLETE   :", PATHS.ONLY_COMPLETE)
+    print("EXCLUDE_REMOVED :", PATHS.EXCLUDE_REMOVED)
+    print("PROMPT_ID       :", f"{PATHS.PROMPT_ID_PREFIX}{{i:0{PATHS.PROMPT_ID_WIDTH}d}}")
+    print("SPLIT_BY        :", PATHS.SPLIT_BY)
+
+    print("--- Outputs ---")
     print("PROMPT_OUT :", PATHS.PROMPT_OUT)
     print("MAP_OUT    :", PATHS.MAP_OUT)
     print("TRAIN_OUT  :", PATHS.TRAIN_OUT)
     print("MODEL_OUT  :", PATHS.MODEL_OUT)
     print("SPLIT_OUT  :", PATHS.SPLIT_OUT)
     print("PRM_NPZ    :", PATHS.PRM_NPZ)
+
     print("--- Model ---")
     print("PROMPT_ENCODER:", CFG.PROMPT_ENCODER)
     print("MAP_DIM       :", CFG.MAP_DIM)
     print("PROMPT_DIM    :", CFG.PROMPT_DIM)
     print("FUSED_DIM     :", CFG.FUSED_DIM)
-    print("BATCH_SIZE :", CFG.BATCH_SIZE)
-    print("VAL/TEST   :", CFG.VAL_RATIO, CFG.TEST_RATIO)
-    print("SEED       :", CFG.SEED)
+    print("BATCH_SIZE    :", CFG.BATCH_SIZE)
+    print("VAL/TEST      :", CFG.VAL_RATIO, CFG.TEST_RATIO)
+    print("SEED          :", CFG.SEED)

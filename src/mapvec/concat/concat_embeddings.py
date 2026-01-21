@@ -39,8 +39,13 @@ def load_npz(npz_path: Path) -> Tuple[np.ndarray, List[str]]:
     return E, ids
 
 def main():
-    ap = argparse.ArgumentParser(description="Concatenate pair-map & prompt embeddings via pairs.csv.")
-    ap.add_argument("--pairs",       type=str, default=str(DATA_DIR / "input"  / "pairs.csv"))
+    ap = argparse.ArgumentParser(description="Concatenate map & prompt embeddings via UserStudy.xlsx.")
+    ap.add_argument("--user_study", type=str, default=str(DATA_DIR / "input" / "UserStudy.xlsx"))
+    ap.add_argument("--sheet", type=str, default="Responses")
+    ap.add_argument("--tile_id_col", type=str, default="tile_id")
+    ap.add_argument("--complete_col", type=str, default="complete")
+    ap.add_argument("--remove_col", type=str, default="remove")
+    ap.add_argument("--text_col", type=str, default="cleaned_text")  # not used here but kept for clarity
     ap.add_argument("--map_npz",     type=str, default=str(DATA_DIR / "output" / "map_out" / "maps_embeddings.npz"))
     ap.add_argument("--prompt_npz",  type=str, default=str(DATA_DIR / "output" / "prompt_out"   / "prompts_embeddings.npz"))
     ap.add_argument("--out_dir",     type=str, default=str(DATA_DIR / "output" / "train_out"))
@@ -54,36 +59,50 @@ def main():
 
     setup_logging(args.verbose)
     t0 = time.time()
-
-    pairs_path   = _resolve(args.pairs)
+    
     map_npz_path = _resolve(args.map_npz)
     prm_npz_path = _resolve(args.prompt_npz)
     out_dir      = _resolve(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # --- load pairs
-    if not pairs_path.exists():
-        logging.error("pairs.csv not found: %s", pairs_path)
-        sys.exit(1)
-    pairs = pd.read_csv(pairs_path, dtype=str)
-
-    if not {"map_id", "prompt_id"}.issubset(pairs.columns):
-        logging.error("pairs.csv must have columns: map_id,prompt_id")
+    # --- build pairs from prompts.parquet (authoritative) ---
+    prompts_pq = _resolve(Path(args.prompt_npz).parent / "prompts.parquet")
+    if not prompts_pq.exists():
+        logging.error("prompts.parquet not found next to prompt_npz: %s", prompts_pq)
         sys.exit(1)
 
-    pairs["map_id"] = pairs["map_id"].astype(str).str.strip()
+    pairs = pd.read_parquet(prompts_pq)
+
+    # Expect columns: prompt_id, text, tile_id
+    if "prompt_id" not in pairs.columns:
+        logging.error("prompts.parquet must contain 'prompt_id'")
+        sys.exit(1)
+    if "tile_id" not in pairs.columns:
+        logging.error(
+            "prompts.parquet must contain 'tile_id' "
+            "(ensure prompt_embeddings.py writes tile_id)"
+        )
+        sys.exit(1)
+
+    # keep label/meta columns if they exist in prompts.parquet
+    keep_cols = ["tile_id", "prompt_id"]
+    for c in ["operator", "intensity", "param_value"]:
+        if c in pairs.columns:
+            keep_cols.append(c)
+
+    pairs = pairs[keep_cols].rename(columns={"tile_id": "map_id"}).copy()
+
+    pairs["map_id"] = pairs["map_id"].astype(str).str.strip().str.zfill(4)
     pairs["prompt_id"] = pairs["prompt_id"].astype(str).str.strip()
-    before = len(pairs)
+
     pairs = pairs.dropna(subset=["map_id", "prompt_id"])
     pairs = pairs[(pairs["map_id"] != "") & (pairs["prompt_id"] != "")]
+
     if args.drop_dupes:
         pairs = pairs.drop_duplicates(subset=["map_id", "prompt_id"])
-    after = len(pairs)
-    if after == 0:
-        logging.error("pairs.csv has no valid rows after cleaning.")
-        sys.exit(1)
-    if after < before:
-        logging.warning("Dropped %d rows (empty/duplicates).", before - after)
+
+    logging.info("Built %d pairs from prompts.parquet", len(pairs))
 
     # --- load embeddings
     E_map, map_ids = load_npz(map_npz_path)
@@ -187,7 +206,7 @@ def main():
         "rows": int(X.shape[0]),
         "skipped_pairs": int(missing),
         "sources": {
-            "pairs_csv": str(pairs_path),
+            "prompts_parquet": str(prompts_pq),
             "map_npz": str(map_npz_path),
             "prompt_npz": str(prm_npz_path),
         },

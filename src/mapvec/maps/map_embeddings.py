@@ -286,6 +286,47 @@ def main():
     if not pairs:
         logging.error("No GeoJSONs embedded. Check --root and --pattern.")
         sys.exit(2)
+    # --- Optional: filter map_ids using UserStudy.xlsx ---
+    try:
+        from src.config import PATHS  # uses your config.py
+        dfu = pd.read_excel(PATHS.USER_STUDY_XLSX, sheet_name=PATHS.RESPONSES_SHEET)
+
+        # Keep only complete=True and remove=False
+        dfu[PATHS.COMPLETE_COL] = dfu[PATHS.COMPLETE_COL].astype(bool)
+        dfu[PATHS.REMOVE_COL]   = dfu[PATHS.REMOVE_COL].astype(bool)
+
+        mask = pd.Series(True, index=dfu.index)
+        if PATHS.ONLY_COMPLETE:
+            mask &= (dfu[PATHS.COMPLETE_COL] == True)
+        if PATHS.EXCLUDE_REMOVED:
+            mask &= (dfu[PATHS.REMOVE_COL] == False)
+        dfu = dfu[mask].copy()
+
+        # Allowed tile_ids (map_ids)
+        tile_raw = dfu[PATHS.TILE_ID_COL]
+        tile_num = pd.to_numeric(tile_raw, errors="coerce")
+
+        if tile_num.notna().all():
+            # ZERO-PAD to match folder names like 0001
+            allowed_tile_ids = set(tile_num.astype(int).astype(str).str.zfill(4))
+        else:
+            allowed_tile_ids = set(
+                tile_raw.astype(str).str.strip().str.zfill(4)
+            )
+
+        before = len(pairs)
+        pairs = [(map_id, path) for (map_id, path) in pairs if str(map_id).strip() in allowed_tile_ids]
+        after = len(pairs)
+
+        logging.info("Filtered maps by UserStudy.xlsx: %d -> %d", before, after)
+
+        if after == 0:
+            logging.error("After Excel filtering, there are no maps left to embed.")
+            sys.exit(2)
+
+    except Exception as e:
+        logging.warning("Excel-based filtering skipped (reason: %s). Embedding all maps in root.", e)
+
 
     # ---------- First pass: compute dataset-wide max_polygons ----------
     logging.info("First pass: counting polygons to normalize poly_count…")

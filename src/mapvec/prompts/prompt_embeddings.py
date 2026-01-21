@@ -328,57 +328,160 @@ def get_embedder(
     return embed_fn, model_label
 
 # ----------------------- I/O helpers -----------------------
-def load_prompts_from_source(input_path: Path) -> Tuple[List[str], List[str], str]:
+def load_prompts_from_source(
+    input_path: Path,
+    sheet_name: str = "Responses",
+    tile_id_col: str = "tile_id",
+    complete_col: str = "complete",
+    remove_col: str = "remove",
+    text_col: str = "cleaned_text",
+) -> Tuple[List[str], List[str], str]:
     """
     Returns (ids, texts, id_colname)
-      - .txt → ids are p000, p001, ...
-      - .csv → supports columns (prompt_id,text) or (id,text)
+
+    Supported inputs:
+      - .txt  → ids are p000, p001, ...
+      - .csv  → columns (prompt_id,text) or (id,text)
+      - .xlsx → user study Excel:
+                keeps rows where complete==True AND remove==False,
+                embeds text_col, generates prompt_id.
     """
     if not input_path or not input_path.exists():
-        raise FileNotFoundError(
-            f"Missing or invalid --input path: {input_path}. "
-            "Provide a .csv (prompt_id,text) or .txt (one per line)."
-        )
+        raise FileNotFoundError(f"Missing or invalid --input path: {input_path}")
 
     ext = input_path.suffix.lower()
+
+    # ===================== EXCEL =====================
+    if ext in (".xlsx", ".xls"):
+        logging.info("Reading Excel: %s (sheet=%s)", input_path, sheet_name)
+        df = pd.read_excel(input_path, sheet_name=sheet_name)
+
+        # ---- Validate schema ----
+        required = [tile_id_col, complete_col, remove_col, text_col]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"Excel sheet '{sheet_name}' is missing required columns: {missing}"
+            )
+
+        # ---- Normalize booleans (Excel-safe) ----
+        df[complete_col] = df[complete_col].astype(bool)
+        df[remove_col]   = df[remove_col].astype(bool)
+
+        # ---- Filter rows ----
+        before = len(df)
+        # Optional: read defaults from src.config if available
+        only_complete = True
+        exclude_removed = True
+        try:
+            from src.config import PATHS
+            only_complete = getattr(PATHS, "ONLY_COMPLETE", True)
+            exclude_removed = getattr(PATHS, "EXCLUDE_REMOVED", True)
+        except Exception:
+            pass
+
+        mask = pd.Series(True, index=df.index)
+        if only_complete:
+            mask &= (df[complete_col] == True)
+        if exclude_removed:
+            mask &= (df[remove_col] == False)
+
+        df = df[mask].copy()
+
+        after = len(df)
+
+        if after == 0:
+            raise ValueError(
+                f"No rows left after filtering (only_complete={only_complete}, exclude_removed={exclude_removed})."
+            )
+
+        logging.info(
+            "Filtered Excel rows: %d → %d (only_complete=%s, exclude_removed=%s)",
+            before, after, only_complete, exclude_removed
+        )
+
+        # ---- Clean text ----
+        df[text_col] = df[text_col].astype(str)
+        df = df[df[text_col].str.strip().ne("")].copy()
+
+        if len(df) == 0:
+            raise ValueError(
+                f"No non-empty values found in text column '{text_col}' after filtering."
+            )
+
+        # ---- Generate prompt IDs ----
+        df = df.reset_index(drop=False).rename(columns={"index": "_row"})
+
+        prefix = "r"
+        width = 8
+        try:
+            from src.config import PATHS
+            prefix = getattr(PATHS, "PROMPT_ID_PREFIX", "r")
+            width = int(getattr(PATHS, "PROMPT_ID_WIDTH", 8))
+        except Exception:
+            pass
+
+        ids = [f"{prefix}{int(r):0{width}d}" for r in df["_row"].tolist()]
+
+        texts = df[text_col].tolist()
+        return ids, texts, "prompt_id"
+
+
+    # ===================== TXT =====================
     if ext == ".txt":
         logging.info("Reading TXT: %s", input_path)
-        texts = [ln.strip() for ln in input_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        if len(texts) == 0:
+        texts = [
+            ln.strip()
+            for ln in input_path.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        if not texts:
             raise ValueError("TXT contains no non-empty lines.")
+
         ids = [f"p{i:03d}" for i in range(len(texts))]
         return ids, texts, "prompt_id"
 
+    # ===================== CSV =====================
     if ext == ".csv":
         logging.info("Reading CSV: %s", input_path)
         df = pd.read_csv(input_path)
+
         if {"prompt_id", "text"}.issubset(df.columns):
             id_col = "prompt_id"
         elif {"id", "text"}.issubset(df.columns):
             id_col = "id"
         else:
-            raise ValueError("CSV must contain columns (prompt_id,text) or (id,text).")
+            raise ValueError(
+                "CSV must contain columns (prompt_id,text) or (id,text)."
+            )
 
         df = df[[id_col, "text"]].copy()
         df[id_col] = df[id_col].astype(str).str.strip()
         df["text"] = df["text"].astype(str)
 
-        before = len(df)
-        df = df[(df[id_col] != "") & df["text"].str.strip().ne("")]
-        after = len(df)
-        if after == 0:
-            raise ValueError("CSV has no valid rows (non-empty id/text) after cleaning.")
-        if after < before:
-            logging.warning("Dropped %d invalid/empty rows from CSV.", before - after)
+        df = df[
+            (df[id_col] != "") &
+            (df["text"].str.strip().ne(""))
+        ]
+
+        if len(df) == 0:
+            raise ValueError(
+                "CSV has no valid rows (non-empty id/text) after cleaning."
+            )
 
         if df[id_col].duplicated().any():
             dupes = df[df[id_col].duplicated()][id_col].tolist()
-            firsts = ", ".join(map(str, dupes[:5]))
-            raise ValueError(f"Duplicate prompt IDs detected: {firsts}{'…' if len(dupes) > 5 else ''}")
+            raise ValueError(
+                f"Duplicate prompt IDs detected: {dupes[:5]}{'…' if len(dupes) > 5 else ''}"
+            )
 
         return df[id_col].tolist(), df["text"].tolist(), id_col
 
-    raise ValueError("Unsupported input type. Use .csv or .txt.")
+    # ===================== UNSUPPORTED =====================
+    raise ValueError(
+        "Unsupported input type. Use .csv, .txt, or .xlsx/.xls."
+    )
+
 
 def save_outputs(
     out_dir: Path,
@@ -397,9 +500,61 @@ def save_outputs(
     np.savez_compressed(npz_path, E=E, ids=np.array(ids, dtype=object))
     logging.info("  saved %s (shape=%s)", npz_path.name, tuple(E.shape))
 
+    # --- build prompts table ---
+    df_out = pd.DataFrame({
+        id_colname: ids,
+        "text": texts,
+    })
+
+    # Optional: add tile_id if input came from Excel
+    # Optional: add tile_id + labels if input came from Excel
+    try:
+        from src.config import PATHS
+        if Path(PATHS.USER_STUDY_XLSX).exists():
+            df_excel = pd.read_excel(PATHS.USER_STUDY_XLSX, sheet_name=PATHS.RESPONSES_SHEET)
+
+            # Apply the SAME filtering as load_prompts_from_source()
+            df_excel[PATHS.COMPLETE_COL] = df_excel[PATHS.COMPLETE_COL].astype(bool)
+            df_excel[PATHS.REMOVE_COL]   = df_excel[PATHS.REMOVE_COL].astype(bool)
+
+            mask = pd.Series(True, index=df_excel.index)
+            if PATHS.ONLY_COMPLETE:
+                mask &= (df_excel[PATHS.COMPLETE_COL] == True)
+            if PATHS.EXCLUDE_REMOVED:
+                mask &= (df_excel[PATHS.REMOVE_COL] == False)
+
+            df_excel = df_excel[mask].copy()
+
+            # IMPORTANT: keep original row index for stable prompt_id mapping
+            df_excel = df_excel.reset_index(drop=False).rename(columns={"index": "_row"})
+
+            # Reconstruct prompt_id exactly like load_prompts_from_source()
+            prefix = getattr(PATHS, "PROMPT_ID_PREFIX", "r")
+            width  = int(getattr(PATHS, "PROMPT_ID_WIDTH", 8))
+            df_excel["prompt_id"] = [f"{prefix}{int(r):0{width}d}" for r in df_excel["_row"].tolist()]
+
+            # Make tile_id match map folder ids (0001 etc.)
+            tile_raw = df_excel[PATHS.TILE_ID_COL]
+            tile_num = pd.to_numeric(tile_raw, errors="coerce")
+            if tile_num.notna().all():
+                df_excel["tile_id"] = tile_num.astype(int).astype(str).str.zfill(4)
+            else:
+                df_excel["tile_id"] = tile_raw.astype(str).str.strip().str.zfill(4)
+
+            # Keep label cols if present
+            keep = ["prompt_id", "tile_id"]
+            for c in [PATHS.OPERATOR_COL, PATHS.INTENSITY_COL, PATHS.PARAM_VALUE_COL]:
+                if c in df_excel.columns:
+                    keep.append(c)
+
+            # Merge (safe even if ordering changes)
+            df_out = df_out.merge(df_excel[keep], on="prompt_id", how="left")
+    except Exception:
+        pass
+
     pq_path = out_dir / "prompts.parquet"
-    pd.DataFrame({id_colname: ids, "text": texts}).to_parquet(pq_path, index=False)
-    logging.info("  saved %s (rows=%d)", pq_path.name, len(ids))
+    df_out.to_parquet(pq_path, index=False)
+    logging.info("  saved %s (rows=%d)", pq_path.name, len(df_out))
 
     csv_name = None
     if also_save_embeddings_csv:
