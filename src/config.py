@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -33,13 +34,21 @@ def try_infer_dims(prompt_npz: Path) -> Tuple[Optional[int], Optional[int]]:
         pass
     return None, None
 
-
 def env_bool(key: str, default: bool = False) -> bool:
     """Parse common truthy/falsey env values."""
     val = os.getenv(key)
     if val is None:
         return default
     return val.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+# --------------------------- operator groups (Solution 1) ---------------------------
+
+# Distance-based operators (param_value in meters)
+DISTANCE_OPS = ("aggregate", "displace", "simplify")
+
+# Area-based operators (param_value in square meters)
+AREA_OPS = ("select",)
 
 
 # --------------------------- config ----------------------------
@@ -148,9 +157,9 @@ class ModelConfig:
 
     PROMPT_ENCODER:
       - 'dan', 'transformer'  → USE variants
-      - 'openai-small', 'openai-large', etc. → LLM embeddings
-      - or any other string you use in prompt_embeddings.py --model
+      - 'openai-small', 'openai-large' → OpenAI embedding models
     """
+
     # Prompt encoder name (generic, not just USE)
     PROMPT_ENCODER: str = "openai-small"
     # PROMPT_ENCODER: str = "dan"
@@ -170,8 +179,22 @@ class ModelConfig:
     TEST_RATIO: float = float(os.getenv("TEST_RATIO", "0.15"))
     SEED: int = int(os.getenv("SEED", "42"))
 
+    # ----------------------- Tile scale (Solution 1 normalization) -----------------------
+    # Tile width/height in meters (set via env for other datasets)
+    TILE_WIDTH_M: float = float(os.getenv("TILE_WIDTH_M", "400"))
+    TILE_HEIGHT_M: float = float(os.getenv("TILE_HEIGHT_M", "400"))
+
+    # Derived (computed in __post_init__)
+    TILE_DIAG_M: float = 0.0
+    TILE_AREA_M2: float = 0.0
+
     def __post_init__(self):
         object.__setattr__(self, "FUSED_DIM", self.MAP_DIM + self.PROMPT_DIM)
+
+        diag = math.sqrt(self.TILE_WIDTH_M**2 + self.TILE_HEIGHT_M**2)
+        area = self.TILE_WIDTH_M * self.TILE_HEIGHT_M
+        object.__setattr__(self, "TILE_DIAG_M", float(diag))
+        object.__setattr__(self, "TILE_AREA_M2", float(area))
 
 
 # --------------------------- public API ------------------------
@@ -228,3 +251,12 @@ def print_summary():
     print("BATCH_SIZE    :", CFG.BATCH_SIZE)
     print("VAL/TEST      :", CFG.VAL_RATIO, CFG.TEST_RATIO)
     print("SEED          :", CFG.SEED)
+
+    print("--- Tile scale (Solution 1) ---")
+    print("TILE_W/H (m)  :", CFG.TILE_WIDTH_M, CFG.TILE_HEIGHT_M)
+    print("TILE_DIAG_M   :", CFG.TILE_DIAG_M)
+    print("TILE_AREA_M2  :", CFG.TILE_AREA_M2)
+
+    print("--- Operator groups (Solution 1) ---")
+    print("DISTANCE_OPS  :", DISTANCE_OPS)
+    print("AREA_OPS      :", AREA_OPS)
