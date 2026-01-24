@@ -54,6 +54,13 @@ def main():
     ap.add_argument("-v", "--verbose",   action="count", default=1)
     ap.add_argument("--l2-prompt", action="store_true",help="L2-normalize prompt embeddings row-wise before concatenation.")
     ap.add_argument("--save-blocks", action="store_true",help="Also save X_map.npy, X_prompt.npy, map_ids.npy, prompt_ids.npy.")
+    ap.add_argument(
+    "--maps_parquet",
+    type=str,
+    default=str(DATA_DIR / "output" / "map_out" / "maps.parquet"),
+    help="maps.parquet containing extent_* columns (from map_embeddings.py)."
+)
+
 
     args = ap.parse_args()
 
@@ -103,6 +110,52 @@ def main():
         pairs = pairs.drop_duplicates(subset=["map_id", "prompt_id"])
 
     logging.info("Built %d pairs from prompts.parquet", len(pairs))
+    # -------------------------------
+    # NEW: merge per-map extent refs
+    # -------------------------------
+    maps_pq = _resolve(args.maps_parquet)
+    if not maps_pq.exists():
+        logging.error("maps.parquet not found: %s (run map_embeddings first)", maps_pq)
+        sys.exit(1)
+
+    maps_df = pd.read_parquet(maps_pq)
+
+    # Require extent columns written by map_embeddings.py
+    needed = ["map_id", "extent_diag_m", "extent_area_m2"]
+    missing_cols = [c for c in needed if c not in maps_df.columns]
+    if missing_cols:
+        logging.error("maps.parquet is missing columns %s. Re-run map_embeddings.py with extent saving.", missing_cols)
+        sys.exit(1)
+
+    # Keep a minimal set (you can keep more if you want)
+    extent_keep = [
+        "map_id",
+        "extent_diag_m",
+        "extent_area_m2",
+        "extent_width_m",
+        "extent_height_m",
+        "extent_minx",
+        "extent_miny",
+        "extent_maxx",
+        "extent_maxy",
+    ]
+    extent_keep = [c for c in extent_keep if c in maps_df.columns]
+
+    maps_df = maps_df[extent_keep].copy()
+    maps_df["map_id"] = maps_df["map_id"].astype(str).str.strip().str.zfill(4)
+
+    before = len(pairs)
+    pairs = pairs.merge(maps_df, on="map_id", how="left")
+
+    # Sanity: any map missing extent is a bug / mismatch between embedded maps and prompts
+    miss_extent = pairs["extent_diag_m"].isna().sum()
+    if miss_extent:
+        logging.warning("⚠️ %d rows missing extent_diag_m after merge (map_id not found in maps.parquet).", miss_extent)
+        if args.fail_on_missing:
+            logging.error("Failing because --fail_on_missing is set.")
+            sys.exit(2)
+
+    logging.info("Merged extent refs from %s into pairs (%d -> %d rows).", maps_pq, before, len(pairs))
 
     # --- load embeddings
     E_map, map_ids = load_npz(map_npz_path)

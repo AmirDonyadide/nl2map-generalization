@@ -81,6 +81,45 @@ def _read_geo(gj_path: Path) -> gpd.GeoDataFrame:
         raise ValueError("All geometries were empty/invalid.")
     return gdf
 
+def compute_extent_refs(gj_path: Path) -> Dict[str, float]:
+    """
+    Compute per-map extent metrics in meters/m²:
+      - extent_width_m, extent_height_m
+      - extent_diag_m (sqrt(w²+h²))
+      - extent_area_m2 (w*h)
+    Uses the GeoDataFrame total bounds after projecting to EPSG:3857 if geographic.
+    """
+    gdf = _read_geo(gj_path)
+
+    try:
+        if gdf.crs and getattr(gdf.crs, "is_geographic", False):
+            gdf = gdf.to_crs(3857)  # meters
+    except Exception:
+        pass
+
+    minx, miny, maxx, maxy = map(float, gdf.total_bounds)
+
+    w = maxx - minx
+    h = maxy - miny
+
+    # guard against weird/degenerate bounds
+    w = float(w) if np.isfinite(w) and w >= 0 else float("nan")
+    h = float(h) if np.isfinite(h) and h >= 0 else float("nan")
+
+    diag = float(np.sqrt(w * w + h * h)) if np.isfinite(w) and np.isfinite(h) else float("nan")
+    area = float(w * h) if np.isfinite(w) and np.isfinite(h) else float("nan")
+
+    return {
+        "extent_minx": float(minx),
+        "extent_miny": float(miny),
+        "extent_maxx": float(maxx),
+        "extent_maxy": float(maxy),
+        "extent_width_m": float(w),
+        "extent_height_m": float(h),
+        "extent_diag_m": float(diag),
+        "extent_area_m2": float(area),
+    }
+
 def _iter_polygons(geom):
     """Yield Polygon parts from any geometry (Polygon, MultiPolygon, GeometryCollection)."""
     if geom is None or geom.is_empty:
@@ -370,16 +409,25 @@ def main():
             vecs.append(vec)
 
             meta = maybe_read_tile_meta(path.parent)
+
+            # NEW: compute dynamic per-map extent refs
+            extent = compute_extent_refs(path)
+
             rows.append({
                 "map_id": map_id,
                 "geojson": str(path),
-                "n_polygons": int(counts.get(map_id, 0)),  # record per-map polygon count
+                "n_polygons": int(counts.get(map_id, 0)),
+
+                # NEW: save extent metrics into maps.parquet
+                **extent,
+
                 **{k: meta.get(k) for k in (
                     "operator","intensity","param_value","param_unit",
                     "input_png","target_png","input_geojson","target_geojson",
                     "n_input_polys","n_target_polys","is_target_empty"
                 ) if k in meta}
             })
+
             logging.info("OK  map_id=%s  -> vector[%d]", map_id, vec.shape[0])
         except Exception as e:
             failed += 1

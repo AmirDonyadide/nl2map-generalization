@@ -10,7 +10,6 @@ from typing import Optional, Tuple
 # --------------------------- helpers ---------------------------
 
 def env_path(key: str, default: Path) -> Path:
-    """Read a path from env (string), else use default."""
     val = os.getenv(key)
     return Path(val) if val else default
 
@@ -35,7 +34,6 @@ def try_infer_dims(prompt_npz: Path) -> Tuple[Optional[int], Optional[int]]:
     return None, None
 
 def env_bool(key: str, default: bool = False) -> bool:
-    """Parse common truthy/falsey env values."""
     val = os.getenv(key)
     if val is None:
         return default
@@ -51,11 +49,36 @@ DISTANCE_OPS = ("aggregate", "displace", "simplify")
 AREA_OPS = ("select",)
 
 
+# --------------------------- extent reference columns ---------------------------
+# These names must match what map_embeddings.py writes into maps.parquet
+# and what concat_embeddings.py merges into train_pairs.parquet.
+
+EXTENT_MINX_COL   = "extent_minx"
+EXTENT_MINY_COL   = "extent_miny"
+EXTENT_MAXX_COL   = "extent_maxx"
+EXTENT_MAXY_COL   = "extent_maxy"
+EXTENT_W_COL      = "extent_width_m"
+EXTENT_H_COL      = "extent_height_m"
+EXTENT_DIAG_COL   = "extent_diag_m"
+EXTENT_AREA_COL   = "extent_area_m2"
+EXTENT_CRS_COL    = "extent_crs"   # optional; only if you add it
+
+
+# --------------------------- normalization behavior ---------------------------
+
+# Primary behavior: use per-map dynamic extents from GeoJSON (recommended)
+USE_DYNAMIC_EXTENT_REFS: bool = env_bool("USE_DYNAMIC_EXTENT_REFS", True)
+
+# What to do if a map has missing/degenerate extent (diag/area NaN or <=0):
+# - If True: fall back to default tile constants below
+# - If False: drop those rows (you handle drop in notebook/code)
+ALLOW_FALLBACK_EXTENT: bool = env_bool("ALLOW_FALLBACK_EXTENT", True)
+
+
 # --------------------------- config ----------------------------
 
 @dataclass(frozen=True)
 class ProjectPaths:
-    # Project root that contains `src/` and `data/`
     PROJ_ROOT: Path = Path(os.getenv("PROJ_ROOT", "../")).resolve()
 
     # Data
@@ -69,37 +92,29 @@ class ProjectPaths:
         / "data" / "userstudy" / "UserStudy.xlsx"
     )
 
-    # Excel sheet name
     RESPONSES_SHEET: str = os.getenv("RESPONSES_SHEET", "Responses")
 
-    # Required columns inside the Responses sheet
-    TILE_ID_COL: str = os.getenv("TILE_ID_COL", "tile_id")        # number
-    COMPLETE_COL: str = os.getenv("COMPLETE_COL", "complete")      # True / False
-    REMOVE_COL: str = os.getenv("REMOVE_COL", "remove")            # True / False
-    TEXT_COL: str = os.getenv("TEXT_COL", "cleaned_text")          # text
-    PARAM_VALUE_COL: str = os.getenv("PARAM_VALUE_COL", "param_value")  # float
-    OPERATOR_COL: str = os.getenv("OPERATOR_COL", "operator")           # text
-    INTENSITY_COL: str = os.getenv("INTENSITY_COL", "intensity")        # text
+    TILE_ID_COL: str = os.getenv("TILE_ID_COL", "tile_id")
+    COMPLETE_COL: str = os.getenv("COMPLETE_COL", "complete")
+    REMOVE_COL: str = os.getenv("REMOVE_COL", "remove")
+    TEXT_COL: str = os.getenv("TEXT_COL", "cleaned_text")
+    PARAM_VALUE_COL: str = os.getenv("PARAM_VALUE_COL", "param_value")
+    OPERATOR_COL: str = os.getenv("OPERATOR_COL", "operator")
+    INTENSITY_COL: str = os.getenv("INTENSITY_COL", "intensity")
 
-    # Training inclusion filters (keep consistent across scripts)
-    ONLY_COMPLETE: bool = env_bool("ONLY_COMPLETE", True)       # keep only complete==True
-    EXCLUDE_REMOVED: bool = env_bool("EXCLUDE_REMOVED", True)   # keep only remove==False
+    ONLY_COMPLETE: bool = env_bool("ONLY_COMPLETE", True)
+    EXCLUDE_REMOVED: bool = env_bool("EXCLUDE_REMOVED", True)
 
-    # Prompt ID scheme (must match prompt_embeddings + concat)
     PROMPT_ID_PREFIX: str = os.getenv("PROMPT_ID_PREFIX", "r")
     PROMPT_ID_WIDTH: int = int(os.getenv("PROMPT_ID_WIDTH", "8"))
 
-    # Split strategy (avoid leakage!)
-    # Recommended: 'tile' means group split by TILE_ID_COL.
-    SPLIT_BY: str = os.getenv("SPLIT_BY", "tile")  # 'tile' or 'row'
+    SPLIT_BY: str = os.getenv("SPLIT_BY", "tile")
 
     # ----------------------- Map inputs -----------------------
     MAPS_ROOT: Path = (
         Path(os.getenv("PROJ_ROOT", "../")).resolve()
         / "data" / "input" / "samples" / "pairs"
     )
-
-    # File patterns
     INPUT_MAPS_PATTERN: str = os.getenv("INPUT_MAPS_PATTERN", "*_input.geojson")
 
     # ----------------------- Outputs -----------------------
@@ -124,15 +139,22 @@ class ProjectPaths:
         / "data" / "output" / "train_out" / "splits"
     )
 
-    # Precomputed embeddings
     PRM_NPZ: Path = (
         Path(os.getenv("PROJ_ROOT", "../")).resolve()
         / "data" / "output" / "prompt_out" / "prompts_embeddings.npz"
     )
 
-    # -------------------------------------------------------------
+    # NEW: useful canonical artifacts
+    MAPS_PARQUET: Path = (
+        Path(os.getenv("PROJ_ROOT", "../")).resolve()
+        / "data" / "output" / "map_out" / "maps.parquet"
+    )
+    TRAIN_PAIRS_PARQUET: Path = (
+        Path(os.getenv("PROJ_ROOT", "../")).resolve()
+        / "data" / "output" / "train_out" / "train_pairs.parquet"
+    )
+
     def ensure_outputs(self) -> "ProjectPaths":
-        """Create output directories if missing."""
         from os import makedirs
         makedirs(self.OUTPUT_DIR, exist_ok=True)
         for p in (self.PROMPT_OUT, self.MAP_OUT, self.TRAIN_OUT, self.MODEL_OUT, self.SPLIT_OUT):
@@ -140,7 +162,6 @@ class ProjectPaths:
         return self
 
     def clean_outputs(self) -> None:
-        """Remove and recreate all output directories (use with caution)."""
         import shutil
         for d in [self.PROMPT_OUT, self.MAP_OUT, self.TRAIN_OUT, self.MODEL_OUT, self.SPLIT_OUT]:
             if d.exists():
@@ -154,54 +175,39 @@ class ProjectPaths:
 class ModelConfig:
     """
     Model hyper-parameters and prompt encoder config.
-
-    PROMPT_ENCODER:
-      - 'dan', 'transformer'  → USE variants
-      - 'openai-small', 'openai-large' → OpenAI embedding models
     """
+    PROMPT_ENCODER: str = os.getenv("PROMPT_ENCODER", "openai-small")
 
-    # Prompt encoder name (generic, not just USE)
-    PROMPT_ENCODER: str = "openai-small"
-    # PROMPT_ENCODER: str = "dan"
-
-    # Dimensions (can be overridden by env or inferred later)
     MAP_DIM: int = int(os.getenv("MAP_DIM", "165"))
     PROMPT_DIM: int = int(os.getenv("PROMPT_DIM", "512"))
-
-    # Will be set in __post_init__
     FUSED_DIM: int = 0
 
-    # Training
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "512"))
 
-    # Splits
     VAL_RATIO: float = float(os.getenv("VAL_RATIO", "0.15"))
     TEST_RATIO: float = float(os.getenv("TEST_RATIO", "0.15"))
     SEED: int = int(os.getenv("SEED", "42"))
 
-    # ----------------------- Tile scale (Solution 1 normalization) -----------------------
-    # Tile width/height in meters (set via env for other datasets)
-    TILE_WIDTH_M: float = float(os.getenv("TILE_WIDTH_M", "400"))
-    TILE_HEIGHT_M: float = float(os.getenv("TILE_HEIGHT_M", "400"))
+    # Fallback tile scale (ONLY used if dynamic extents are missing/degenerate)
+    DEFAULT_TILE_WIDTH_M: float = float(os.getenv("DEFAULT_TILE_WIDTH_M", "400"))
+    DEFAULT_TILE_HEIGHT_M: float = float(os.getenv("DEFAULT_TILE_HEIGHT_M", "400"))
 
-    # Derived (computed in __post_init__)
-    TILE_DIAG_M: float = 0.0
-    TILE_AREA_M2: float = 0.0
+    DEFAULT_TILE_DIAG_M: float = 0.0
+    DEFAULT_TILE_AREA_M2: float = 0.0
 
     def __post_init__(self):
         object.__setattr__(self, "FUSED_DIM", self.MAP_DIM + self.PROMPT_DIM)
 
-        diag = math.sqrt(self.TILE_WIDTH_M**2 + self.TILE_HEIGHT_M**2)
-        area = self.TILE_WIDTH_M * self.TILE_HEIGHT_M
-        object.__setattr__(self, "TILE_DIAG_M", float(diag))
-        object.__setattr__(self, "TILE_AREA_M2", float(area))
+        diag = math.sqrt(self.DEFAULT_TILE_WIDTH_M**2 + self.DEFAULT_TILE_HEIGHT_M**2)
+        area = self.DEFAULT_TILE_WIDTH_M * self.DEFAULT_TILE_HEIGHT_M
+        object.__setattr__(self, "DEFAULT_TILE_DIAG_M", float(diag))
+        object.__setattr__(self, "DEFAULT_TILE_AREA_M2", float(area))
 
 
 # --------------------------- public API ------------------------
 
 PATHS = ProjectPaths().ensure_outputs()
 
-# Try to infer PROMPT_DIM from existing embeddings, if available
 _, inferred_prm_dim = try_infer_dims(PATHS.PRM_NPZ)
 if inferred_prm_dim is not None:
     CFG = ModelConfig(PROMPT_DIM=inferred_prm_dim)
@@ -242,6 +248,8 @@ def print_summary():
     print("MODEL_OUT  :", PATHS.MODEL_OUT)
     print("SPLIT_OUT  :", PATHS.SPLIT_OUT)
     print("PRM_NPZ    :", PATHS.PRM_NPZ)
+    print("MAPS_PQ    :", PATHS.MAPS_PARQUET)
+    print("PAIRS_PQ   :", PATHS.TRAIN_PAIRS_PARQUET)
 
     print("--- Model ---")
     print("PROMPT_ENCODER:", CFG.PROMPT_ENCODER)
@@ -252,11 +260,19 @@ def print_summary():
     print("VAL/TEST      :", CFG.VAL_RATIO, CFG.TEST_RATIO)
     print("SEED          :", CFG.SEED)
 
-    print("--- Tile scale (Solution 1) ---")
-    print("TILE_W/H (m)  :", CFG.TILE_WIDTH_M, CFG.TILE_HEIGHT_M)
-    print("TILE_DIAG_M   :", CFG.TILE_DIAG_M)
-    print("TILE_AREA_M2  :", CFG.TILE_AREA_M2)
+    print("--- Normalization behavior ---")
+    print("USE_DYNAMIC_EXTENT_REFS :", USE_DYNAMIC_EXTENT_REFS)
+    print("ALLOW_FALLBACK_EXTENT   :", ALLOW_FALLBACK_EXTENT)
 
-    print("--- Operator groups (Solution 1) ---")
-    print("DISTANCE_OPS  :", DISTANCE_OPS)
-    print("AREA_OPS      :", AREA_OPS)
+    print("--- Fallback tile scale (ONLY if dynamic refs missing) ---")
+    print("DEFAULT_TILE_W/H (m) :", CFG.DEFAULT_TILE_WIDTH_M, CFG.DEFAULT_TILE_HEIGHT_M)
+    print("DEFAULT_TILE_DIAG_M  :", CFG.DEFAULT_TILE_DIAG_M)
+    print("DEFAULT_TILE_AREA_M2 :", CFG.DEFAULT_TILE_AREA_M2)
+
+    print("--- Extent columns ---")
+    print("EXTENT_DIAG_COL :", EXTENT_DIAG_COL)
+    print("EXTENT_AREA_COL :", EXTENT_AREA_COL)
+
+    print("--- Operator groups ---")
+    print("DISTANCE_OPS :", DISTANCE_OPS)
+    print("AREA_OPS     :", AREA_OPS)
