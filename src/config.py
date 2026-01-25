@@ -75,6 +75,59 @@ USE_DYNAMIC_EXTENT_REFS: bool = env_bool("USE_DYNAMIC_EXTENT_REFS", True)
 ALLOW_FALLBACK_EXTENT: bool = env_bool("ALLOW_FALLBACK_EXTENT", True)
 
 
+# --------------------------- param estimation strategy ---------------------------
+# Choose how to estimate param_value at inference:
+# - "mlp": your current per-operator MLPRegressor (predict param_norm -> unnormalize)
+# - "hybrid": rule-based parsing (numbers/%/small/large) + optional ML fallback
+PARAM_STRATEGY: str = os.getenv("PARAM_STRATEGY", "mlp").strip().lower()
+if PARAM_STRATEGY not in {"mlp", "hybrid"}:
+    raise ValueError(f"PARAM_STRATEGY must be 'mlp' or 'hybrid', got: {PARAM_STRATEGY}")
+
+
+# --------------------------- hybrid rules: qualitative -> quantile ---------------------------
+# Used when prompt has "small/medium/large" but no number.
+# You can tune these in thesis experiments.
+QUAL_TO_QUANTILE = {
+    "very_small": 0.10,
+    "small": 0.25,
+    "medium": 0.50,
+    "large": 0.75,
+    "very_large": 0.90,
+}
+
+# Words that map to the above categories (lowercased match)
+QUAL_SYNONYMS = {
+    "very_small": ["very small", "tiny", "minuscule", "very little"],
+    "small":      ["small", "smaller", "minor", "little"],
+    "medium":     ["medium", "moderate", "average", "normal"],
+    "large":      ["large", "bigger", "big", "major"],
+    "very_large": ["very large", "huge", "massive", "giant"],
+}
+
+
+# --------------------------- hybrid rules: unit aliases ---------------------------
+# Normalize units found in text.
+UNIT_ALIASES = {
+    # distance
+    "m":  ["m", "meter", "meters", "metre", "metres"],
+    "km": ["km", "kilometer", "kilometers", "kilometre", "kilometres"],
+    # area
+    "m2": ["m2", "m^2", "sqm", "sq m", "sq. m", "square meter", "square meters",
+           "square metre", "square metres", "meter^2", "metre^2"],
+    "km2": ["km2", "km^2", "square kilometer", "square kilometers", "square kilometre", "square kilometres"],
+    # percent
+    "%":  ["%", "percent", "percentage", "per cent"],
+}
+
+# If prompt has *no* usable number/percent/qual word, use these defaults (in original units).
+# Keep conservative so you don't explode errors.
+DEFAULT_PARAM_BY_OPERATOR = {
+    "aggregate": 5.0,   # meters (example default)
+    "displace":  5.0,   # meters
+    "simplify":  5.0,   # meters
+    "select":   50.0,   # m² (example default)
+}
+
 # --------------------------- config ----------------------------
 
 @dataclass(frozen=True)
@@ -276,3 +329,12 @@ def print_summary():
     print("--- Operator groups ---")
     print("DISTANCE_OPS :", DISTANCE_OPS)
     print("AREA_OPS     :", AREA_OPS)
+    print("--- Operator groups ---")
+    print("DISTANCE_OPS :", DISTANCE_OPS)
+    print("AREA_OPS     :", AREA_OPS)
+
+    print("--- Param estimation ---")
+    print("PARAM_STRATEGY :", PARAM_STRATEGY)
+    print("QUAL_TO_QUANTILE:", QUAL_TO_QUANTILE)
+    print("DEFAULT_PARAM_BY_OPERATOR:", DEFAULT_PARAM_BY_OPERATOR)
+

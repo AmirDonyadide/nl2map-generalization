@@ -9,7 +9,7 @@ import time
 import json
 import argparse
 import logging
-from typing import Tuple, List, Optional, Callable
+from typing import Tuple, List, Optional, Callable, Sequence
 from pathlib import Path
 import shutil
 
@@ -330,14 +330,14 @@ def get_embedder(
 # ----------------------- I/O helpers -----------------------
 def load_prompts_from_source(
     input_path: Path,
-    sheet_name: str = "Responses",
-    tile_id_col: str = "tile_id",
-    complete_col: str = "complete",
-    remove_col: str = "remove",
-    text_col: str = "cleaned_text",
-) -> Tuple[List[str], List[str], str]:
+    sheet_name: str,
+    tile_id_col: str,
+    complete_col: str,
+    remove_col: str,
+    text_col: str,
+):
     """
-    Returns (ids, texts, id_colname)
+    Returns (ids, texts, tile_ids, id_colname)
 
     Supported inputs:
       - .txt  → ids are p000, p001, ...
@@ -422,10 +422,17 @@ def load_prompts_from_source(
             pass
 
         ids = [f"{prefix}{int(r):0{width}d}" for r in df["_row"].tolist()]
-
         texts = df[text_col].tolist()
-        return ids, texts, "prompt_id"
 
+        # ✅ NEW: tile_ids normalized to folder-like ids (0001 etc.)
+        tile_raw = df[tile_id_col]
+        tile_num = pd.to_numeric(tile_raw, errors="coerce")
+        if tile_num.notna().all():
+            tile_ids = tile_num.astype(int).astype(str).str.zfill(4).tolist()
+        else:
+            tile_ids = tile_raw.astype(str).str.strip().str.zfill(4).tolist()
+
+        return ids, texts, tile_ids, "prompt_id"
 
     # ===================== TXT =====================
     if ext == ".txt":
@@ -439,7 +446,9 @@ def load_prompts_from_source(
             raise ValueError("TXT contains no non-empty lines.")
 
         ids = [f"p{i:03d}" for i in range(len(texts))]
-        return ids, texts, "prompt_id"
+        tile_ids = [None] * len(ids)
+        return ids, texts, tile_ids, "prompt_id"
+
 
     # ===================== CSV =====================
     if ext == ".csv":
@@ -475,7 +484,10 @@ def load_prompts_from_source(
                 f"Duplicate prompt IDs detected: {dupes[:5]}{'…' if len(dupes) > 5 else ''}"
             )
 
-        return df[id_col].tolist(), df["text"].tolist(), id_col
+        ids = df[id_col].tolist()
+        texts = df["text"].tolist()
+        tile_ids = [None] * len(ids)
+        return ids, texts, tile_ids, id_col
 
     # ===================== UNSUPPORTED =====================
     raise ValueError(
@@ -491,6 +503,7 @@ def save_outputs(
     model_name: str,
     l2_normalized: bool,
     id_colname: str = "prompt_id",
+    tile_ids: Optional[Sequence[Optional[str]]] = None,  # ✅ NEW
     also_save_embeddings_csv: bool = False,
 ):
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -506,51 +519,11 @@ def save_outputs(
         "text": texts,
     })
 
-    # Optional: add tile_id if input came from Excel
-    # Optional: add tile_id + labels if input came from Excel
-    try:
-        from src.config import PATHS
-        if Path(PATHS.USER_STUDY_XLSX).exists():
-            df_excel = pd.read_excel(PATHS.USER_STUDY_XLSX, sheet_name=PATHS.RESPONSES_SHEET)
-
-            # Apply the SAME filtering as load_prompts_from_source()
-            df_excel[PATHS.COMPLETE_COL] = df_excel[PATHS.COMPLETE_COL].astype(bool)
-            df_excel[PATHS.REMOVE_COL]   = df_excel[PATHS.REMOVE_COL].astype(bool)
-
-            mask = pd.Series(True, index=df_excel.index)
-            if PATHS.ONLY_COMPLETE:
-                mask &= (df_excel[PATHS.COMPLETE_COL] == True)
-            if PATHS.EXCLUDE_REMOVED:
-                mask &= (df_excel[PATHS.REMOVE_COL] == False)
-
-            df_excel = df_excel[mask].copy()
-
-            # IMPORTANT: keep original row index for stable prompt_id mapping
-            df_excel = df_excel.reset_index(drop=False).rename(columns={"index": "_row"})
-
-            # Reconstruct prompt_id exactly like load_prompts_from_source()
-            prefix = getattr(PATHS, "PROMPT_ID_PREFIX", "r")
-            width  = int(getattr(PATHS, "PROMPT_ID_WIDTH", 8))
-            df_excel["prompt_id"] = [f"{prefix}{int(r):0{width}d}" for r in df_excel["_row"].tolist()]
-
-            # Make tile_id match map folder ids (0001 etc.)
-            tile_raw = df_excel[PATHS.TILE_ID_COL]
-            tile_num = pd.to_numeric(tile_raw, errors="coerce")
-            if tile_num.notna().all():
-                df_excel["tile_id"] = tile_num.astype(int).astype(str).str.zfill(4)
-            else:
-                df_excel["tile_id"] = tile_raw.astype(str).str.strip().str.zfill(4)
-
-            # Keep label cols if present
-            keep = ["prompt_id", "tile_id"]
-            for c in [PATHS.OPERATOR_COL, PATHS.INTENSITY_COL, PATHS.PARAM_VALUE_COL]:
-                if c in df_excel.columns:
-                    keep.append(c)
-
-            # Merge (safe even if ordering changes)
-            df_out = df_out.merge(df_excel[keep], on="prompt_id", how="left")
-    except Exception:
-        pass
+    # ✅ Add tile_id if provided
+    if tile_ids is not None:
+        if len(tile_ids) != len(ids):
+            raise ValueError(f"tile_ids length {len(tile_ids)} != ids length {len(ids)}")
+        df_out["tile_id"] = [None if v is None else str(v).zfill(4) for v in tile_ids]
 
     pq_path = out_dir / "prompts.parquet"
     df_out.to_parquet(pq_path, index=False)
@@ -663,7 +636,14 @@ def main():
         sys.exit(2)
 
     try:
-        ids, texts, id_colname = load_prompts_from_source(in_path)
+        ids, texts, tile_ids, id_colname = load_prompts_from_source(
+        input_path=in_path,
+        sheet_name="Responses",
+        tile_id_col="tile_id",
+        complete_col="complete",
+        remove_col="remove",
+        text_col="cleaned_text",
+    )
         logging.info(
             "Loaded %d prompts (id_col=%s). Sample IDs: %s",
             len(ids),
@@ -689,6 +669,7 @@ def main():
             model_name=model_label,
             l2_normalized=args.l2,
             id_colname=id_colname if id_colname in ("prompt_id", "id") else "prompt_id",
+            tile_ids=tile_ids,     
             also_save_embeddings_csv=args.embeddings_csv,
         )
 
@@ -699,4 +680,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# ----------------------- End of File -----------------------

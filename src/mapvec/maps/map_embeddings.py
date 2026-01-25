@@ -83,17 +83,20 @@ def _read_geo(gj_path: Path) -> gpd.GeoDataFrame:
 
 def compute_extent_refs(gj_path: Path) -> Dict[str, float]:
     """
-    Compute per-map extent metrics in meters/m²:
-      - extent_width_m, extent_height_m
-      - extent_diag_m (sqrt(w²+h²))
-      - extent_area_m2 (w*h)
-    Uses the GeoDataFrame total bounds after projecting to EPSG:3857 if geographic.
+    Compute per-map extent metrics.
+    Returns width/height/diag/area computed from GeoDataFrame total_bounds.
+
+    IMPORTANT:
+    - If CRS is geographic (lat/lon), we project to EPSG:3857 (meters).
+    - If CRS is missing or not geographic, we do NOT force a CRS; we just compute bounds.
+      (In your dataset, you said values are in meters already → this is fine.)
     """
     gdf = _read_geo(gj_path)
 
+    # If CRS is geographic, project to meters
     try:
         if gdf.crs and getattr(gdf.crs, "is_geographic", False):
-            gdf = gdf.to_crs(3857)  # meters
+            gdf = gdf.to_crs(3857)
     except Exception:
         pass
 
@@ -102,9 +105,11 @@ def compute_extent_refs(gj_path: Path) -> Dict[str, float]:
     w = maxx - minx
     h = maxy - miny
 
-    # guard against weird/degenerate bounds
-    w = float(w) if np.isfinite(w) and w >= 0 else float("nan")
-    h = float(h) if np.isfinite(h) and h >= 0 else float("nan")
+    # guard against degenerate
+    if not np.isfinite(w) or w < 0:
+        w = float("nan")
+    if not np.isfinite(h) or h < 0:
+        h = float("nan")
 
     diag = float(np.sqrt(w * w + h * h)) if np.isfinite(w) and np.isfinite(h) else float("nan")
     area = float(w * h) if np.isfinite(w) and np.isfinite(h) else float("nan")
@@ -410,7 +415,6 @@ def main():
 
             meta = maybe_read_tile_meta(path.parent)
 
-            # NEW: compute dynamic per-map extent refs
             extent = compute_extent_refs(path)
 
             rows.append({
