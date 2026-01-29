@@ -69,8 +69,8 @@ def route_and_predict_param_value(
     op_idx = np.asarray(op_idx).astype(int, copy=False).reshape(-1)
     if len(op_idx) != X.shape[0]:
         raise ValueError("op_idx length must match number of rows in X")
-
-    if diag_col not in df.columns and area_col not in df.columns:
+    
+    if diag_col not in df.columns or area_col not in df.columns:
         raise KeyError(f"df must contain '{diag_col}' and '{area_col}'")
 
     cn = [str(x) for x in class_names]
