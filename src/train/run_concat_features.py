@@ -47,6 +47,7 @@ def run_concat_features_from_dirs(
     save_X_name: Optional[str] = None,
     save_meta_name: Optional[str] = None,
     prompt_id_width: int = 4,
+    pairs_parquet: Optional[Path] = None,
 ) -> ConcatRunMeta:
     prompt_out_dir = Path(prompt_out_dir)
     map_out_dir = Path(map_out_dir)
@@ -55,7 +56,7 @@ def run_concat_features_from_dirs(
     ce.setup_logging(verbosity=verbosity)
 
     prm_npz_path = prompt_out_dir / "prompts_embeddings.npz"
-    prompts_pq = prompt_out_dir / "prompts.parquet"
+    prompts_pq = Path(pairs_parquet) if pairs_parquet is not None else (prompt_out_dir / "prompts.parquet")
 
     map_npz_path = map_out_dir / "maps_embeddings.npz"
     maps_pq = map_out_dir / "maps.parquet"
