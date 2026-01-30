@@ -1,3 +1,4 @@
+#src/train/preprocessing.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,7 +10,6 @@ import numpy as np
 
 from src.types import FeatureMode
 from .utils._preprocessing_utils import (
-    MapPreprocFitted,
     fit_map_preproc,
     l2_normalize_rows,
     split_map_prompt,

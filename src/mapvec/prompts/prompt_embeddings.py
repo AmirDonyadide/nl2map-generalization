@@ -1,4 +1,4 @@
-# prompt_embeddings.py
+#src/mapvec/prompts/prompt_embeddings.py
 # Embed prompts (CSV/TXT) with USE-DAN/Transformer or OpenAI LLM embeddings and save artifacts.
 # Default I/O lives under the project ./data folder (at repo root, not inside src/).
 

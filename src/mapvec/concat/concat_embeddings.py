@@ -1,4 +1,4 @@
-# src/mapvec/concat/concat_embeddings.py
+# src/mapvec/concat/concat_embeddings.py 
 # Join pair-map + prompt embeddings using prompts.parquet and export:
 #  - X_concat.npy  (row-wise [map_vec | prompt_vec])
 #  - train_pairs.parquet (joined rows with original pair metadata)

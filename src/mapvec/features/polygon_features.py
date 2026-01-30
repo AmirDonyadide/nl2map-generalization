@@ -1,3 +1,4 @@
+#src/mapvec/features/polygon_features.py
 """
 polygon_features.py
 Hand-crafted polygon feature extraction (vector embeddings) using Shapely + Pandas.

@@ -1,4 +1,4 @@
-# src/mapvec/maps/map_embeddings.py
+# src/mapvec/maps/map_embeddings.py 
 # Compute fixed-length map vectors from GeoJSONs and save artifacts.
 # Drop-in compatible with the original script (same CLI, defaults, outputs).
 
@@ -6,13 +6,13 @@ from __future__ import annotations
 
 import sys, json, argparse, logging
 from pathlib import Path
-from typing import Iterator, Tuple, List, Dict, cast, Iterable, Union
+from typing import Iterator, Tuple, List, Dict
 
 import numpy as np
 import pandas as pd
 import geopandas as gpd
 
-from shapely.geometry import Polygon, MultiPolygon, GeometryCollection
+from shapely.geometry import Polygon, MultiPolygon
 
 # ↳ local modules (unchanged import paths)
 from src.mapvec.features.polygon_features import embed_polygons_handcrafted

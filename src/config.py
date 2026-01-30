@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-# --------------------------- helpers ---------------------------
+# --------------------------- helpers ----------------------------
 
 def env_path(key: str, default: Path) -> Path:
     val = os.getenv(key)
