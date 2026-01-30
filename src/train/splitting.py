@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence
 
 import json
 import numpy as np
@@ -31,6 +31,18 @@ def _clean_string_col(s: pd.Series) -> pd.Series:
     return s
 
 
+def _normalize_map_id_col(s: pd.Series) -> pd.Series:
+    # robust zfill; keeps strings and handles numeric map ids
+    out = s.astype(str).str.strip()
+    out = out.mask(out.isin(["", "nan", "None"]), pd.NA)
+    # if numeric-looking -> zfill(4)
+    m = out.notna() & out.str.fullmatch(r"\d+")
+    out.loc[m] = out.loc[m].str.zfill(4)
+    # if non-numeric, still zfill(4) is harmless if already "1304"
+    out = out.fillna(pd.NA)
+    return out
+
+
 def _has_all_ops(dfx: pd.DataFrame, op_col: str, fixed_classes: Sequence[str]) -> bool:
     return set(dfx[op_col].dropna().unique()) >= set([str(x).strip().lower() for x in fixed_classes])
 
@@ -52,14 +64,14 @@ def make_splits_multi_prompt_to_train(
     verbose: bool = True,
 ) -> SplitResult:
     """
-    Create train/val/test splits with the following constraints:
-      - No leakage across splits by map_id
-      - All multi-prompt maps are forced into TRAIN
+    Create train/val/test splits with constraints:
+      - No leakage by map_id
+      - All multi-prompt maps forced into TRAIN
       - VAL/TEST contain only single-prompt maps
       - Optionally stratify single-prompt maps by operator×intensity (fallback to operator-only if sparse)
       - Ensure each split contains all operators in fixed_classes
 
-    Returns row indices into df/X.
+    Note: prompt_id is NOT used here and is assumed stable from Excel.
     """
     df = df.copy()
 
@@ -67,6 +79,9 @@ def make_splits_multi_prompt_to_train(
         raise KeyError(f"Missing '{map_id_col}' in df.")
     if op_col not in df.columns:
         raise KeyError(f"Missing '{op_col}' in df.")
+
+    # ✅ Normalize map_id defensively
+    df[map_id_col] = _normalize_map_id_col(df[map_id_col])
 
     # clean operator + intensity columns
     df[op_col] = _clean_string_col(df[op_col])
@@ -92,13 +107,70 @@ def make_splits_multi_prompt_to_train(
     map_level = df_single.groupby(map_id_col).first().reset_index()
     map_level = map_level.dropna(subset=[op_col]).copy()
 
+    # ---------------------------
+    # FALLBACK: tiny datasets
+    # ---------------------------
+    n_single = len(map_level)
+    if n_single < 2:
+        if verbose:
+            print(
+                "\n⚠️ Fallback split activated: "
+                f"only {n_single} single-prompt map(s) available.\n"
+                "➡️ All data will be assigned to TRAIN.\n"
+                "➡️ VAL and TEST will be empty.\n"
+                "This is expected for very small/debug datasets."
+            )
+
+        train_maps = set(multi_map_ids) | set(single_map_ids)
+        val_maps: set[str] = set()
+        test_maps: set[str] = set()
+
+        train_idx = df.index[df[map_id_col].isin(train_maps)].to_numpy()
+        val_idx = np.array([], dtype=int)
+        test_idx = np.array([], dtype=int)
+
+        if save_splits_json is not None:
+            save_splits_json = Path(save_splits_json)
+            save_splits_json.parent.mkdir(parents=True, exist_ok=True)
+            json.dump(
+                {
+                    "train_idx": train_idx.tolist(),
+                    "val_idx": [],
+                    "test_idx": [],
+                    "train_maps": sorted(list(train_maps)),
+                    "val_maps": [],
+                    "test_maps": [],
+                    "seed_used": int(seed),
+                    "use_intensity_for_strat_requested": bool(use_intensity_for_strat),
+                    "use_intensity_for_strat_final": False,
+                    "fixed_classes": [str(x) for x in fixed_classes],
+                    "ratios": {"val_ratio": float(val_ratio), "test_ratio": float(test_ratio)},
+                    "note": "fallback_all_train_due_to_tiny_dataset",
+                },
+                open(save_splits_json, "w"),
+                indent=2,
+            )
+            if verbose:
+                print("\n✅ Saved fallback split to", str(save_splits_json))
+
+        return SplitResult(
+            train_idx=train_idx,
+            val_idx=val_idx,
+            test_idx=test_idx,
+            train_maps=sorted([str(x) for x in train_maps]),
+            val_maps=[],
+            test_maps=[],
+            multi_map_ids=sorted([str(x) for x in multi_map_ids]),
+            single_map_ids=sorted([str(x) for x in single_map_ids]),
+            seed_used=int(seed),
+            use_intensity_for_strat=False,
+        )
+
     # strat label
     use_int_strat_final = bool(use_intensity_for_strat and intensity_col and intensity_col in map_level.columns)
     if use_int_strat_final:
         map_level["_strat"] = (
-            map_level[op_col].astype("string")
-            + "__"
-            + map_level[intensity_col].astype("string")
+            map_level[op_col].astype("string") + "__" + map_level[intensity_col].astype("string")
         )
         vc = map_level["_strat"].value_counts()
         if (vc < 2).any():
@@ -140,7 +212,6 @@ def make_splits_multi_prompt_to_train(
         val_maps = single_val_maps
         test_maps = single_test_maps
 
-        # leakage check
         if (train_maps & val_maps) or (train_maps & test_maps) or (val_maps & test_maps):
             continue
 
@@ -148,7 +219,6 @@ def make_splits_multi_prompt_to_train(
         df_val_tmp = df[df[map_id_col].isin(val_maps)]
         df_test_tmp = df[df[map_id_col].isin(test_maps)]
 
-        # must contain all operators in each split
         if not (_has_all_ops(df_train_tmp, op_col, fixed_classes)
                 and _has_all_ops(df_val_tmp, op_col, fixed_classes)
                 and _has_all_ops(df_test_tmp, op_col, fixed_classes)):
@@ -166,45 +236,9 @@ def make_splits_multi_prompt_to_train(
 
     train_maps, val_maps, test_maps, used_seed = best
 
-    # row-level indices
     train_idx = df.index[df[map_id_col].isin(train_maps)].to_numpy()
     val_idx = df.index[df[map_id_col].isin(val_maps)].to_numpy()
     test_idx = df.index[df[map_id_col].isin(test_maps)].to_numpy()
-
-    # hard guarantees
-    if not set(df.loc[train_idx, map_id_col]).isdisjoint(df.loc[val_idx, map_id_col]):
-        raise RuntimeError("Leakage: train and val share map_ids.")
-    if not set(df.loc[train_idx, map_id_col]).isdisjoint(df.loc[test_idx, map_id_col]):
-        raise RuntimeError("Leakage: train and test share map_ids.")
-    if not set(df.loc[val_idx, map_id_col]).isdisjoint(df.loc[test_idx, map_id_col]):
-        raise RuntimeError("Leakage: val and test share map_ids.")
-    if not set(multi_map_ids).issubset(set(train_maps)):
-        raise RuntimeError("Constraint violated: not all multi-prompt maps are in TRAIN.")
-
-    if verbose:
-        print("\n=== SPLIT SUMMARY ===")
-        print(f"✅ Split found (seed={used_seed})")
-        print(f"Train maps: {len(train_maps)}  (includes multi-prompt maps: {len(set(multi_map_ids))})")
-        print(f"Val maps:   {len(val_maps)}")
-        print(f"Test maps:  {len(test_maps)}")
-        print("✅ Verified: no map_id leakage across splits.")
-        print("✅ Verified: all multi-prompt maps are in TRAIN.")
-
-        print("\nTRAIN — Operator counts")
-        print(df.loc[train_idx, op_col].value_counts())
-        print("\nVAL — Operator counts")
-        print(df.loc[val_idx, op_col].value_counts())
-        print("\nTEST — Operator counts")
-        print(df.loc[test_idx, op_col].value_counts())
-
-        if intensity_col and intensity_col in df.columns:
-            def _tab(dfx, name):
-                print(f"\n{name} — Operator × Intensity table (counts)")
-                tab = dfx.groupby([op_col, intensity_col]).size().unstack(fill_value=0).sort_index()
-                print(tab)
-            _tab(df.loc[train_idx], "TRAIN")
-            _tab(df.loc[val_idx], "VAL")
-            _tab(df.loc[test_idx], "TEST")
 
     # save splits json
     if save_splits_json is not None:
@@ -215,6 +249,9 @@ def make_splits_multi_prompt_to_train(
                 "train_idx": train_idx.tolist(),
                 "val_idx": val_idx.tolist(),
                 "test_idx": test_idx.tolist(),
+                "train_maps": sorted([str(x) for x in train_maps]),
+                "val_maps": sorted([str(x) for x in val_maps]),
+                "test_maps": sorted([str(x) for x in test_maps]),
                 "seed_used": int(used_seed),
                 "use_intensity_for_strat_requested": bool(use_intensity_for_strat),
                 "use_intensity_for_strat_final": bool(use_int_strat_final),

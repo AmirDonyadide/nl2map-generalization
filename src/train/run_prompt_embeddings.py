@@ -49,6 +49,9 @@ def run_prompt_embeddings_from_config(
 
     pe.setup_logging(verbosity=verbosity)
 
+    # ✅ NEW: read prompt_id directly from Excel (no regeneration)
+    prompt_id_col = getattr(paths, "PROMPT_ID_COL", "prompt_id")
+
     ids, texts, tile_ids, id_colname = pe.load_prompts_from_source(
         input_path=input_path,
         sheet_name=paths.RESPONSES_SHEET,
@@ -56,6 +59,7 @@ def run_prompt_embeddings_from_config(
         complete_col=paths.COMPLETE_COL,
         remove_col=paths.REMOVE_COL,
         text_col=paths.TEXT_COL,
+        prompt_id_col=prompt_id_col,  # ✅ NEW
     )
 
     if len(texts) == 0:

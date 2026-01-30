@@ -12,7 +12,14 @@ import pandas as pd
 from src.mapvec.concat import concat_embeddings as ce
 
 
-FeatureMode = Literal["prompt_only", "prompt_plus_map"]
+# Updated to reflect actual experiment families (even if this function only uses 2 modes for X construction)
+FeatureMode = Literal[
+    "prompt_only",
+    "prompt_plus_map",
+    "use_map",
+    "openai_map",
+    "map_only",
+]
 
 
 @dataclass(frozen=True)
@@ -32,13 +39,22 @@ class ConcatRunMeta:
 
 
 def _load_npz_E_and_ids(npz_path: Path) -> Tuple[np.ndarray, List[str]]:
-    """
-    Load embeddings and IDs from the standard NPZ format used in this repo.
-    """
     E, ids = ce.load_npz(npz_path)
-    # ensure ids are str
     ids = [str(x).strip() for x in ids]
     return np.asarray(E), ids
+
+
+def _normalize_prompt_id_series(s: pd.Series, *, width: int = 8) -> pd.Series:
+    """
+    Ensure prompt_id is a clean string and preserve leading zeros.
+    If prompt_id is purely numeric, pad to `width`.
+    """
+    out = s.astype(str).str.strip()
+    out = out.mask(out.isin(["", "nan", "None"]), pd.NA)
+
+    m = out.notna() & out.str.fullmatch(r"\d+")
+    out.loc[m] = out.loc[m].str.zfill(int(width))
+    return out
 
 
 def run_concat_features_from_dirs(
@@ -49,30 +65,11 @@ def run_concat_features_from_dirs(
     exp_name: str,
     feature_mode: FeatureMode,
     verbosity: int = 1,
-    save_pairs_name: Optional[str] = None,   # default train_pairs_{exp_name}.parquet
-    save_X_name: Optional[str] = None,       # default X_{exp_name}.npy
-    save_meta_name: Optional[str] = None,    # default meta_{exp_name}.json
+    save_pairs_name: Optional[str] = None,
+    save_X_name: Optional[str] = None,
+    save_meta_name: Optional[str] = None,
+    prompt_id_width: int = 8,  # ✅ NEW: keep consistent with your Excel format
 ) -> ConcatRunMeta:
-    """
-    Concatenate embeddings to create the model input matrix X and aligned pairs parquet.
-
-    Reads from:
-      prompt_out_dir/
-        - prompts_embeddings.npz
-        - prompts.parquet
-      map_out_dir/
-        - maps_embeddings.npz
-        - maps.parquet   (must contain extent_diag_m, extent_area_m2)
-
-    Writes to out_dir/:
-      - X_{exp_name}.npy
-      - train_pairs_{exp_name}.parquet
-      - meta_{exp_name}.json
-
-    feature_mode:
-      - "prompt_only": X = X_prm
-      - "prompt_plus_map": X = [X_map | X_prm]
-    """
     prompt_out_dir = Path(prompt_out_dir)
     map_out_dir = Path(map_out_dir)
     out_dir = Path(out_dir)
@@ -86,16 +83,23 @@ def run_concat_features_from_dirs(
     map_npz_path = map_out_dir / "maps_embeddings.npz"
     maps_pq = map_out_dir / "maps.parquet"
 
-    for p in [prm_npz_path, prompts_pq, map_npz_path, maps_pq]:
+    # Always required for all modes: we always need pairs (from prompts.parquet) + maps + extents
+    required = [prompts_pq, map_npz_path, maps_pq]
+
+    # Prompt embeddings are required only if prompts are part of X
+    if feature_mode in ("prompt_only", "prompt_plus_map", "use_map", "openai_map"):
+        required.append(prm_npz_path)
+
+    for p in required:
         if not p.exists():
             raise FileNotFoundError(f"Missing required input: {p}")
+
 
     # ---- build pairs from prompts.parquet (authoritative) ----
     pairs = pd.read_parquet(prompts_pq)
     if "prompt_id" not in pairs.columns or "tile_id" not in pairs.columns:
         raise RuntimeError("prompts.parquet must contain columns: prompt_id, tile_id")
 
-    # keep text for hybrid/rule-based param extraction later
     need_cols = ["tile_id", "prompt_id", "text"]
     missing_cols = [c for c in need_cols if c not in pairs.columns]
     if missing_cols:
@@ -103,7 +107,8 @@ def run_concat_features_from_dirs(
 
     pairs = pairs.rename(columns={"tile_id": "map_id"})[["map_id", "prompt_id", "text"]].copy()
     pairs["map_id"] = pairs["map_id"].astype(str).str.strip().str.zfill(4)
-    pairs["prompt_id"] = pairs["prompt_id"].astype(str).str.strip()
+    pairs["prompt_id"] = _normalize_prompt_id_series(pairs["prompt_id"], width=prompt_id_width)
+
     pairs = pairs.dropna(subset=["map_id", "prompt_id"])
     pairs = pairs[(pairs["map_id"] != "") & (pairs["prompt_id"] != "")]
     pairs = pairs.drop_duplicates(subset=["map_id", "prompt_id"]).reset_index(drop=True)
@@ -132,14 +137,23 @@ def run_concat_features_from_dirs(
 
     pairs = pairs.merge(maps_df[extent_cols], on="map_id", how="left")
 
-    # drop rows where extents are missing (means prompt tile doesn't exist in maps embeddings)
     n_missing_extent = int(pairs["extent_diag_m"].isna().sum())
     if n_missing_extent:
         pairs = pairs.dropna(subset=["extent_diag_m", "extent_area_m2"]).reset_index(drop=True)
 
     # ---- load embeddings ----
     E_map, map_ids = _load_npz_E_and_ids(map_npz_path)
-    E_prm, prm_ids = _load_npz_E_and_ids(prm_npz_path)
+
+    E_prm = None
+    prm_ids: List[str] = []
+    if feature_mode in ("prompt_only", "prompt_plus_map", "use_map", "openai_map"):
+        E_prm, prm_ids = _load_npz_E_and_ids(prm_npz_path)
+
+    # Normalize ids the same way as pairs (important if ids in NPZ are numeric-looking strings)
+    map_ids = [str(x).strip().zfill(4) for x in map_ids]
+    if feature_mode in ("prompt_only", "prompt_plus_map", "use_map", "openai_map"):
+        prm_ids = [str(x).strip() for x in prm_ids]
+        prm_ids = [pid.zfill(prompt_id_width) if pid.isdigit() else pid for pid in prm_ids]
 
     idx_map = {k: i for i, k in enumerate(map_ids)}
     idx_prm = {k: i for i, k in enumerate(prm_ids)}
@@ -150,30 +164,61 @@ def run_concat_features_from_dirs(
     ip_list: List[int] = []
     missing_ids = 0
 
-    for i, row in enumerate(pairs.itertuples(index=False), start=0):
-        im = idx_map.get(str(row.map_id))
-        ip = idx_prm.get(str(row.prompt_id))
-        if im is None or ip is None:
-            missing_ids += 1
-            continue
-        chosen_rows.append(i)
-        im_list.append(im)
-        ip_list.append(ip)
+    idx_map = {k: i for i, k in enumerate(map_ids)}
+
+    if feature_mode == "map_only":
+        # map-only: only map_id must exist in map embeddings
+        for i, row in enumerate(pairs.itertuples(index=False), start=0):
+            mid = str(row.map_id).strip().zfill(4)
+            im = idx_map.get(mid)
+            if im is None:
+                missing_ids += 1
+                continue
+            chosen_rows.append(i)
+            im_list.append(im)
+    else:
+        # prompt-based: need both map_id and prompt_id
+        assert E_prm is not None
+        idx_prm = {k: i for i, k in enumerate(prm_ids)}
+
+        for i, row in enumerate(pairs.itertuples(index=False), start=0):
+            mid = str(row.map_id).strip().zfill(4)
+            pid_raw = str(row.prompt_id).strip()
+            pid = pid_raw.zfill(prompt_id_width) if pid_raw.isdigit() else pid_raw
+
+            im = idx_map.get(mid)
+            ip = idx_prm.get(pid)
+
+            if im is None or ip is None:
+                missing_ids += 1
+                continue
+
+            chosen_rows.append(i)
+            im_list.append(im)
+            ip_list.append(ip)
 
     if not im_list:
         raise RuntimeError("No valid pairs after ID matching.")
 
-    X_prm = E_prm[np.asarray(ip_list, dtype=int)].astype(np.float32, copy=False)
-    map_dim = int(E_map.shape[1])
-    prompt_dim = int(E_prm.shape[1])
 
-    if feature_mode == "prompt_only":
-        X = X_prm
-    elif feature_mode == "prompt_plus_map":
-        X_map = E_map[np.asarray(im_list, dtype=int)].astype(np.float32, copy=False)
-        X = np.hstack([X_map, X_prm]).astype(np.float32, copy=False)
+    map_dim = int(E_map.shape[1])
+
+    if feature_mode == "map_only":
+        X = E_map[np.asarray(im_list, dtype=int)].astype(np.float32, copy=False)
+        prompt_dim = 0
+
     else:
-        raise ValueError(f"Unknown feature_mode: {feature_mode}")
+        assert E_prm is not None
+        X_prm = E_prm[np.asarray(ip_list, dtype=int)].astype(np.float32, copy=False)
+        prompt_dim = int(E_prm.shape[1])
+
+        if feature_mode == "prompt_only":
+            X = X_prm
+        elif feature_mode in ("prompt_plus_map", "use_map", "openai_map"):
+            X_map = E_map[np.asarray(im_list, dtype=int)].astype(np.float32, copy=False)
+            X = np.hstack([X_map, X_prm]).astype(np.float32, copy=False)
+        else:
+            raise ValueError(f"Unknown feature_mode: {feature_mode}")
 
     join_df = pairs.iloc[chosen_rows].reset_index(drop=True)
     assert X.shape[0] == len(join_df), "Row count mismatch between X and join_df."
@@ -205,6 +250,7 @@ def run_concat_features_from_dirs(
             "prompt_npz": str(prm_npz_path),
         },
         "extent_cols_saved": [c for c in extent_cols if c != "map_id"],
+        "prompt_id_width": int(prompt_id_width),
     }
     meta_path.write_text(json.dumps(meta, indent=2))
 

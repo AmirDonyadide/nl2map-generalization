@@ -335,7 +335,9 @@ def load_prompts_from_source(
     complete_col: str,
     remove_col: str,
     text_col: str,
+    prompt_id_col: str = "prompt_id",   # ✅ NEW
 ):
+
     """
     Returns (ids, texts, tile_ids, id_colname)
 
@@ -410,21 +412,52 @@ def load_prompts_from_source(
             )
 
         # ---- Generate prompt IDs ----
-        df = df.reset_index(drop=False).rename(columns={"index": "_row"})
+        # ---- Use prompt_id from Excel (do NOT generate IDs) ----
+        # ---- Use prompt_id from Excel (do NOT generate IDs) ----
+        if prompt_id_col not in df.columns:
+            raise ValueError(
+                f"Excel sheet '{sheet_name}' is missing required column '{prompt_id_col}'. "
+                "You want to use Excel IDs (0001, 0002, ...), so this column must exist."
+            )
 
-        prefix = "r"
-        width = 8
-        try:
-            from src.config import PATHS
-            prefix = getattr(PATHS, "PROMPT_ID_PREFIX", "r")
-            width = int(getattr(PATHS, "PROMPT_ID_WIDTH", 8))
-        except Exception:
-            pass
+        # Preserve leading zeros robustly:
+        # - If Excel stored as numeric (e.g., 1.0), convert safely to int then zfill.
+        # - Otherwise treat as string and zfill.
+        raw_pid = df[prompt_id_col]
 
-        ids = [f"{prefix}{int(r):0{width}d}" for r in df["_row"].tolist()]
-        texts = df[text_col].tolist()
+        pid_num = pd.to_numeric(raw_pid, errors="coerce")
+        if pid_num.notna().all():
+            # Excel numeric column: 1, 2, 3 ... -> "0001", "0002", ...
+            df[prompt_id_col] = pid_num.astype(int).astype(str).str.zfill(4)
+        else:
+            # Mixed / string column: keep as string, strip, normalize
+            df[prompt_id_col] = raw_pid.astype(str).str.strip()
 
-        # ✅ NEW: tile_ids normalized to folder-like ids (0001 etc.)
+            # Treat typical "empty" tokens as missing
+            df.loc[df[prompt_id_col].str.lower().isin(["", "nan", "none"]), prompt_id_col] = pd.NA
+            df = df.dropna(subset=[prompt_id_col]).copy()
+
+            # If IDs look numeric but as strings ("1", "2"), also normalize
+            pid_num2 = pd.to_numeric(df[prompt_id_col], errors="coerce")
+            if pid_num2.notna().all():
+                df[prompt_id_col] = pid_num2.astype(int).astype(str).str.zfill(4)
+            else:
+                # Otherwise just pad to 4 (safe even if already "0001")
+                df[prompt_id_col] = df[prompt_id_col].astype(str).str.zfill(4)
+
+        # Final sanity checks
+        if df[prompt_id_col].duplicated().any():
+            dupes = df.loc[df[prompt_id_col].duplicated(), prompt_id_col].astype(str).tolist()
+            raise ValueError(
+                "Duplicate prompt_id values found in Excel after filtering. "
+                f"Examples: {dupes[:10]}"
+            )
+
+        # OPTIONAL strict format check (uncomment if you want exactly 4 digits)
+        # bad = df.loc[~df[prompt_id_col].str.fullmatch(r"\d{4}"), prompt_id_col].tolist()
+        # if bad:
+        #     raise ValueError(f"prompt_id must be exactly 4 digits. Bad examples: {bad[:10]}")
+        # ---- tile_ids ----
         tile_raw = df[tile_id_col]
         tile_num = pd.to_numeric(tile_raw, errors="coerce")
         if tile_num.notna().all():
@@ -432,66 +465,14 @@ def load_prompts_from_source(
         else:
             tile_ids = tile_raw.astype(str).str.strip().str.zfill(4).tolist()
 
+        ids = df[prompt_id_col].tolist()
+        texts = df[text_col].tolist()
         return ids, texts, tile_ids, "prompt_id"
 
-    # ===================== TXT =====================
-    if ext == ".txt":
-        logging.info("Reading TXT: %s", input_path)
-        texts = [
-            ln.strip()
-            for ln in input_path.read_text(encoding="utf-8").splitlines()
-            if ln.strip()
-        ]
-        if not texts:
-            raise ValueError("TXT contains no non-empty lines.")
-
-        ids = [f"p{i:03d}" for i in range(len(texts))]
-        tile_ids = [None] * len(ids)
-        return ids, texts, tile_ids, "prompt_id"
-
-
-    # ===================== CSV =====================
-    if ext == ".csv":
-        logging.info("Reading CSV: %s", input_path)
-        df = pd.read_csv(input_path)
-
-        if {"prompt_id", "text"}.issubset(df.columns):
-            id_col = "prompt_id"
-        elif {"id", "text"}.issubset(df.columns):
-            id_col = "id"
-        else:
-            raise ValueError(
-                "CSV must contain columns (prompt_id,text) or (id,text)."
-            )
-
-        df = df[[id_col, "text"]].copy()
-        df[id_col] = df[id_col].astype(str).str.strip()
-        df["text"] = df["text"].astype(str)
-
-        df = df[
-            (df[id_col] != "") &
-            (df["text"].str.strip().ne(""))
-        ]
-
-        if len(df) == 0:
-            raise ValueError(
-                "CSV has no valid rows (non-empty id/text) after cleaning."
-            )
-
-        if df[id_col].duplicated().any():
-            dupes = df[df[id_col].duplicated()][id_col].tolist()
-            raise ValueError(
-                f"Duplicate prompt IDs detected: {dupes[:5]}{'…' if len(dupes) > 5 else ''}"
-            )
-
-        ids = df[id_col].tolist()
-        texts = df["text"].tolist()
-        tile_ids = [None] * len(ids)
-        return ids, texts, tile_ids, id_col
 
     # ===================== UNSUPPORTED =====================
     raise ValueError(
-        "Unsupported input type. Use .csv, .txt, or .xlsx/.xls."
+        "Unsupported input type. Use .xlsx/.xls."
     )
 
 
@@ -637,13 +618,15 @@ def main():
 
     try:
         ids, texts, tile_ids, id_colname = load_prompts_from_source(
-        input_path=in_path,
-        sheet_name="Responses",
-        tile_id_col="tile_id",
-        complete_col="complete",
-        remove_col="remove",
-        text_col="cleaned_text",
-    )
+            input_path=in_path,
+            sheet_name="Responses",
+            tile_id_col="tile_id",
+            complete_col="complete",
+            remove_col="remove",
+            text_col="cleaned_text",
+            prompt_id_col="prompt_id",  # ✅ NEW
+        )
+
         logging.info(
             "Loaded %d prompts (id_col=%s). Sample IDs: %s",
             len(ids),

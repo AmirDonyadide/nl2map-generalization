@@ -151,6 +151,7 @@ class ProjectPaths:
     COMPLETE_COL: str = os.getenv("COMPLETE_COL", "complete")
     REMOVE_COL: str = os.getenv("REMOVE_COL", "remove")
     TEXT_COL: str = os.getenv("TEXT_COL", "cleaned_text")
+    PROMPT_ID_COL: str = os.getenv("PROMPT_ID_COL", "prompt_id")
     PARAM_VALUE_COL: str = os.getenv("PARAM_VALUE_COL", "param_value")
     OPERATOR_COL: str = os.getenv("OPERATOR_COL", "operator")
     INTENSITY_COL: str = os.getenv("INTENSITY_COL", "intensity")
@@ -291,7 +292,8 @@ def print_summary():
     print("--- Filters / IDs / Split ---")
     print("ONLY_COMPLETE   :", PATHS.ONLY_COMPLETE)
     print("EXCLUDE_REMOVED :", PATHS.EXCLUDE_REMOVED)
-    print("PROMPT_ID       :", f"{PATHS.PROMPT_ID_PREFIX}{{i:0{PATHS.PROMPT_ID_WIDTH}d}}")
+    print("PROMPT_ID_COL   :", PATHS.PROMPT_ID_COL)
+    print("PROMPT_ID_RULE  :", "Read from Excel (no generation).")
     print("SPLIT_BY        :", PATHS.SPLIT_BY)
 
     print("--- Outputs ---")
