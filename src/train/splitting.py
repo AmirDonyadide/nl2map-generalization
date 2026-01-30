@@ -32,7 +32,7 @@ def _clean_string_col(s: pd.Series) -> pd.Series:
 
 
 def _normalize_map_id_col(s: pd.Series) -> pd.Series:
-    # robust zfill; keeps strings and handles numeric map ids
+    # robust zfill; keeps strings and handles numeric map ids,
     out = s.astype(str).str.strip()
     out = out.mask(out.isin(["", "nan", "None"]), pd.NA)
     # if numeric-looking -> zfill(4)

@@ -1,15 +1,12 @@
-# src/train/run_prompt_embeddings.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import numpy as np
 
-# Your existing embedding module (already supports USE + OpenAI)
 from src.mapvec.prompts import prompt_embeddings as pe
-
 
 @dataclass(frozen=True)
 class PromptEmbeddingRunMeta:
@@ -19,7 +16,11 @@ class PromptEmbeddingRunMeta:
     embeddings_path: str
     prompts_parquet_path: str
 
-
+def _require_attrs(obj: Any, attrs: list[str], *, where: str) -> None:
+    missing = [a for a in attrs if getattr(obj, a, None) is None]
+    if missing:
+        raise AttributeError(f"{where} is missing required attributes: {missing}")
+    
 def run_prompt_embeddings_from_config(
     *,
     input_path: Path,
@@ -33,23 +34,29 @@ def run_prompt_embeddings_from_config(
     """
     End-to-end prompt embedding pipeline.
 
-    Loads prompts from the user study file, embeds them using cfg.PROMPT_ENCODER
-    (USE or OpenAI), and writes outputs to out_dir in the same format used by
-    the rest of your pipeline.
+    Loads prompts from the user study file, embeds them using cfg.PROMPT_ENCODER,
+    and writes outputs to out_dir.
 
-    Required fields expected in `paths`:
-      - RESPONSES_SHEET, TILE_ID_COL, COMPLETE_COL, REMOVE_COL, TEXT_COL
+    Required in `paths`:
+      - RESPONSES_SHEET, TILE_ID_COL, COMPLETE_COL, REMOVE_COL, TEXT_COL, DATA_DIR
+      - optional: PROMPT_ID_COL
 
-    Required fields expected in `cfg`:
+    Required in `cfg`:
       - PROMPT_ENCODER, BATCH_SIZE
     """
+    _require_attrs(
+        paths,
+        ["RESPONSES_SHEET", "TILE_ID_COL", "COMPLETE_COL", "REMOVE_COL", "TEXT_COL", "DATA_DIR"],
+        where="paths",
+    )
+    _require_attrs(cfg, ["PROMPT_ENCODER", "BATCH_SIZE"], where="cfg")
+
     input_path = Path(input_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pe.setup_logging(verbosity=verbosity)
 
-    # ✅ NEW: read prompt_id directly from Excel (no regeneration)
     prompt_id_col = getattr(paths, "PROMPT_ID_COL", "prompt_id")
 
     ids, texts, tile_ids, id_colname = pe.load_prompts_from_source(
@@ -59,7 +66,7 @@ def run_prompt_embeddings_from_config(
         complete_col=paths.COMPLETE_COL,
         remove_col=paths.REMOVE_COL,
         text_col=paths.TEXT_COL,
-        prompt_id_col=prompt_id_col,  # ✅ NEW
+        prompt_id_col=prompt_id_col,
     )
 
     if len(texts) == 0:
@@ -72,8 +79,11 @@ def run_prompt_embeddings_from_config(
         batch_size=int(cfg.BATCH_SIZE),
     )
 
-    E = embed_fn(texts)
-    E = np.asarray(E)
+    E = np.asarray(embed_fn(texts))
+    if E.ndim != 2 or E.shape[0] != len(texts):
+        raise RuntimeError(
+            f"Unexpected embedding shape: {E.shape}. Expected (n_prompts, dim)=({len(texts)}, dim)."
+        )
 
     pe.save_outputs(
         out_dir=out_dir,
@@ -87,7 +97,6 @@ def run_prompt_embeddings_from_config(
         also_save_embeddings_csv=also_save_embeddings_csv,
     )
 
-    # These filenames are defined by prompt_embeddings.save_outputs
     embeddings_path = out_dir / "prompts_embeddings.npz"
     prompts_parquet_path = out_dir / "prompts.parquet"
 

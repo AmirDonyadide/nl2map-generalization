@@ -1,16 +1,16 @@
-# src/train/train_regressors.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-
-from sklearn.neural_network import MLPRegressor
-from sklearn.model_selection import GroupKFold, RandomizedSearchCV
-from sklearn.preprocessing import StandardScaler
 from scipy.stats import loguniform
+from sklearn.model_selection import GroupKFold, RandomizedSearchCV
+from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import StandardScaler
+
+from .utils._regressor_utils import fit_reg_maybe_weighted
 
 
 @dataclass(frozen=True)
@@ -19,13 +19,6 @@ class RegressorTrainResult:
     cv_summary: Dict[str, Dict[str, Any]]
     use_log1p: bool
 
-def _fit_reg_maybe_weighted(reg, X, y, sample_w):
-    try:
-        reg.fit(X, y, sample_weight=sample_w)
-        return True
-    except TypeError:
-        reg.fit(X, y)
-        return False
 
 def train_regressors_per_operator(
     *,
@@ -43,11 +36,12 @@ def train_regressors_per_operator(
     verbose: int = 1,
 ) -> RegressorTrainResult:
     """
-    Train one MLPRegressor per operator.
+    Train one MLPRegressor per operator to predict target_col (default: param_norm).
 
-    Regressors predict param_norm (or log1p(param_norm) if use_log1p=True),
-    with an internal StandardScaler fitted on the target per operator.
-    Uses GroupKFold by map_id to avoid leakage.
+    - Optional target transform: log1p (requires non-negative target)
+    - Per-operator StandardScaler on the target
+    - GroupKFold by group_col to avoid leakage
+    - RandomizedSearchCV over MLPRegressor hyperparameters
 
     Returns:
       regressors_by_class: {operator: (regressor, target_scaler)}
@@ -62,22 +56,26 @@ def train_regressors_per_operator(
     y_train_cls = np.asarray(y_train_cls, dtype=int).reshape(-1)
     sample_w = np.asarray(sample_w, dtype=np.float64).reshape(-1)
 
-    groups_tr = df_train[group_col].astype(str).values
+    if not (len(X_train_s) == len(df_train) == len(y_train_cls) == len(sample_w)):
+        raise ValueError("X_train_s, df_train, y_train_cls, sample_w must have the same length.")
+
+    groups_tr = df_train[group_col].astype(str).to_numpy()
     y_train_norm = pd.to_numeric(df_train[target_col], errors="coerce").to_numpy(dtype=float)
 
     if not np.isfinite(y_train_norm).all():
-        raise ValueError("Non-finite values found in param_norm in df_train.")
+        raise ValueError(f"Non-finite values found in '{target_col}' in df_train.")
 
     if use_log1p:
         if (y_train_norm < 0).any():
-            raise ValueError("use_log1p=True but param_norm contains negatives.")
+            raise ValueError("use_log1p=True but target contains negatives.")
         ytr_t = np.log1p(y_train_norm)
-        inv_t = np.expm1
     else:
         ytr_t = y_train_norm.copy()
-        inv_t = lambda x: x  # noqa
 
-    gk = GroupKFold(n_splits=n_splits)
+    if n_iter < 1:
+        raise ValueError("n_iter must be >= 1.")
+    if n_splits < 2:
+        raise ValueError("n_splits must be >= 2.")
 
     base_reg = MLPRegressor(
         activation="relu",
@@ -102,17 +100,28 @@ def train_regressors_per_operator(
 
     for cls_idx, cls_name in enumerate(class_names):
         op = str(cls_name).strip().lower()
-
         m_tr = (y_train_cls == cls_idx)
+
         Xk = X_train_s[m_tr]
         yk = ytr_t[m_tr]
         gk_tr = groups_tr[m_tr]
         wk = sample_w[m_tr]
 
-        if Xk.shape[0] < 10:
+        n_samples = int(Xk.shape[0])
+        n_groups = int(len(np.unique(gk_tr)))
+
+        if n_samples < 10:
             if verbose:
-                print(f"⚠️ Skipping class '{op}' (too few samples: {Xk.shape[0]}).")
+                print(f"⚠️ Skipping class '{op}' (too few samples: {n_samples}).")
             continue
+        if n_groups < 2:
+            if verbose:
+                print(f"⚠️ Skipping class '{op}' (too few groups for GroupKFold: groups={n_groups}).")
+            continue
+
+        # adapt splits if needed
+        n_splits_eff = min(int(n_splits), n_groups)
+        gk = GroupKFold(n_splits=n_splits_eff)
 
         t_scaler = StandardScaler()
         yk_s = t_scaler.fit_transform(yk.reshape(-1, 1)).ravel()
@@ -122,15 +131,16 @@ def train_regressors_per_operator(
         search = RandomizedSearchCV(
             estimator=base_reg,
             param_distributions=param_dist_reg,
-            n_iter=n_iter,
+            n_iter=int(n_iter),
             scoring="neg_root_mean_squared_error",
             cv=splits,
             n_jobs=-1,
             refit=True,
-            random_state=random_state,
-            verbose=verbose,
+            random_state=int(random_state),
+            verbose=int(verbose),
         )
 
+        # fit search (with weights if supported)
         try:
             search.fit(Xk, yk_s, sample_weight=wk)
             used_w_search = True
@@ -142,24 +152,32 @@ def train_regressors_per_operator(
         scale0 = float(getattr(t_scaler, "scale_", [1.0])[0] or 1.0)
         rmse_norm_units = float(rmse_scaled * scale0)
 
-
         if verbose:
             print(f"\n=== Regressor for class '{op}' (predicting {target_col}) ===")
+            print(f"samples={n_samples}, groups={n_groups}, cv_splits={n_splits_eff}, used_sample_weight={used_w_search}")
             print("best CV RMSE (scaled):", rmse_scaled)
             print("best CV RMSE (param_norm units):", rmse_norm_units)
             print("best params:", search.best_params_)
 
         cv_summary[op] = {
+            "n_samples": n_samples,
+            "n_groups": n_groups,
+            "cv_splits": n_splits_eff,
+            "used_sample_weight": bool(used_w_search),
             "rmse_scaled": rmse_scaled,
             "rmse_param_norm": rmse_norm_units,
             "params": search.best_params_,
         }
 
         reg_full = MLPRegressor(
-            **{**search.best_estimator_.get_params(), "early_stopping": False, "max_iter": 2000, "random_state": random_state}
+            **{
+                **search.best_estimator_.get_params(),
+                "early_stopping": False,
+                "max_iter": 2000,
+                "random_state": int(random_state),
+            }
         )
-        _fit_reg_maybe_weighted(reg_full, Xk, yk_s, wk)
-
+        fit_reg_maybe_weighted(reg_full, Xk, yk_s, wk)
         regressors[op] = (reg_full, t_scaler)
 
     return RegressorTrainResult(

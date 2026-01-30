@@ -1,12 +1,17 @@
-# src/train/labels_and_weights.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence
 
 import numpy as np
 import pandas as pd
-from sklearn.utils.class_weight import compute_class_weight
+
+from .utils._labels_and_weights_utils import (
+    compute_class_weights_from_train,
+    compute_map_weights,
+    encode_labels,
+    normalize_fixed_classes,
+)
 
 
 @dataclass(frozen=True)
@@ -44,46 +49,30 @@ def build_labels_and_sample_weights(
       - sample_w (float64, length len(df_train))
       - class_weight_map
     """
-    class_names = [str(x).strip().lower() for x in fixed_classes]
-    class_arr = np.array(class_names)
+    class_names = normalize_fixed_classes(fixed_classes)
 
-    # labels
-    y_train = pd.Categorical(df_train[op_col], categories=class_arr).codes
-    y_val = pd.Categorical(df_val[op_col], categories=class_arr).codes
-    y_test = pd.Categorical(df_test[op_col], categories=class_arr).codes
+    y_train = encode_labels(df_train, op_col=op_col, class_names=class_names, split_name="TRAIN")
+    y_val = encode_labels(df_val, op_col=op_col, class_names=class_names, split_name="VAL")
+    y_test = encode_labels(df_test, op_col=op_col, class_names=class_names, split_name="TEST")
 
-    # Safety checks
-    if not (y_train >= 0).all():
-        raise ValueError("TRAIN contains operator labels not in fixed_classes.")
-    if not (y_val >= 0).all():
-        raise ValueError("VAL contains operator labels not in fixed_classes.")
-    if not (y_test >= 0).all():
-        raise ValueError("TEST contains operator labels not in fixed_classes.")
+    cls_w, class_weight_map = compute_class_weights_from_train(
+        y_train, class_names=class_names, class_weight_mode=class_weight_mode
+    )
 
-    # class weights from training distribution only
-    classes = np.arange(len(class_names))
-    cls_w = compute_class_weight(class_weight=class_weight_mode, classes=classes, y=y_train)
-    cls_w = np.asarray(cls_w, dtype=np.float64)
-
-    class_weight_map = {class_names[i]: float(cls_w[i]) for i in range(len(class_names))}
-
-    # per-sample class weights
     w_class = cls_w[y_train].astype(np.float64)
 
-    # map-level multiplicity correction (train only)
     if use_map_weight:
-        map_counts = df_train[map_id_col].value_counts()
-        w_map = df_train[map_id_col].map(lambda m: 1.0 / float(map_counts[m])).to_numpy(dtype=np.float64)
+        w_map = compute_map_weights(df_train, map_id_col=map_id_col)
     else:
         w_map = np.ones(len(df_train), dtype=np.float64)
 
     sample_w = (w_class * w_map).astype(np.float64)
 
     return LabelsAndWeights(
-        class_names=class_names,
-        y_train=y_train.astype(int),
-        y_val=y_val.astype(int),
-        y_test=y_test.astype(int),
+        class_names=list(class_names),
+        y_train=y_train,
+        y_val=y_val,
+        y_test=y_test,
         sample_w=sample_w,
         class_weight_map=class_weight_map,
     )

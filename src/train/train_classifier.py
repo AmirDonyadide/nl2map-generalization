@@ -1,16 +1,16 @@
-# src/train/train_classifier.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence
 
-import numpy as np
 import joblib
-
-from sklearn.neural_network import MLPClassifier
+import numpy as np
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
+from sklearn.neural_network import MLPClassifier
+
+from .utils._classifier_utils import (candidate_sort_key, cv_macro_f1, draw_mlp_params, fit_maybe_weighted)
 
 
 @dataclass(frozen=True)
@@ -22,58 +22,6 @@ class ClassifierTrainResult:
     val_f1_macro: float
     test_acc: float
     test_f1_macro: float
-
-def _fit_maybe_weighted(clf, X, y, sample_w):
-    """
-    Fit classifier with sample_weight if supported by this sklearn version.
-    Falls back to unweighted fit otherwise.
-    """
-    try:
-        clf.fit(X, y, sample_weight=sample_w)
-        return True
-    except TypeError:
-        clf.fit(X, y)
-        return False
-
-def _draw_params(rng: np.random.RandomState, n: int) -> List[Dict[str, Any]]:
-    sizes = [(64,), (128,), (256,), (128, 64), (256, 128), (256, 128, 64)]
-    batches = [16, 32, 64, 128]
-    out = []
-    for _ in range(n):
-        out.append(
-            {
-                "hidden_layer_sizes": sizes[rng.randint(len(sizes))],
-                "alpha": 10 ** rng.uniform(-5, np.log10(3e-2)),  # ~loguniform(1e-5, 3e-2)
-                "learning_rate_init": 10 ** rng.uniform(-4, np.log10(3e-3)),  # ~loguniform(1e-4, 3e-3)
-                "batch_size": batches[rng.randint(len(batches))],
-                "activation": "relu",
-                "solver": "adam",
-                "max_iter": 800,
-                "early_stopping": False,  # IMPORTANT: use all training samples
-                "random_state": 42,
-                "verbose": False,
-                "tol": 1e-4,
-            }
-        )
-    return out
-
-
-def _cv_macro_f1(
-    *,
-    X: np.ndarray,
-    y: np.ndarray,
-    groups: np.ndarray,
-    sample_w: np.ndarray,
-    params: Dict[str, Any],
-    cv: StratifiedGroupKFold,
-) -> Tuple[float, float]:
-    scores: List[float] = []
-    for tr_idx, va_idx in cv.split(X, y, groups):
-        clf = MLPClassifier(**params)
-        _fit_maybe_weighted(clf, X[tr_idx], y[tr_idx], sample_w[tr_idx])
-        pred = clf.predict(X[va_idx])
-        scores.append(float(f1_score(y[va_idx], pred, average="macro")))
-    return float(np.mean(scores)), float(np.std(scores))
 
 
 def train_mlp_classifier_with_search(
@@ -93,19 +41,18 @@ def train_mlp_classifier_with_search(
     n_splits: int = 5,
     seed: int = 42,
     verbose: bool = True,
-    save_name: str | None = None,  # default: clf_{exp_name}.joblib
+    save_name: str | None = None,
 ) -> ClassifierTrainResult:
     """
     Random-search over MLPClassifier configs using:
       - grouped CV (StratifiedGroupKFold) for stability scoring
       - selection by external VAL macro-F1 (tie: VAL acc, then CV mean)
     Then refit best model on FULL TRAIN and evaluate on VAL + TEST.
-    Saves classifier artifact to out_dir.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure float64
+    # cast & validate shapes
     X_train = np.asarray(X_train, dtype=np.float64)
     X_val = np.asarray(X_val, dtype=np.float64)
     X_test = np.asarray(X_test, dtype=np.float64)
@@ -115,38 +62,49 @@ def train_mlp_classifier_with_search(
     sample_w = np.asarray(sample_w, dtype=np.float64)
     groups_train = np.asarray(groups_train).astype(str)
 
+    if not (len(X_train) == len(y_train) == len(sample_w) == len(groups_train)):
+        raise ValueError("TRAIN arrays must have matching lengths: X_train, y_train, sample_w, groups_train.")
+    if X_val.shape[1] != X_train.shape[1] or X_test.shape[1] != X_train.shape[1]:
+        raise ValueError("X_val/X_test must have the same number of columns as X_train.")
+    if n_iter < 1:
+        raise ValueError("n_iter must be >= 1.")
+    if n_splits < 2:
+        raise ValueError("n_splits must be >= 2.")
+
     cn = [str(x) for x in class_names]
+    n_classes = len(cn)
+    if n_classes < 2:
+        raise ValueError("Need at least 2 classes for classification.")
+    if (y_train < 0).any() or (y_val < 0).any() or (y_test < 0).any():
+        raise ValueError("Found negative class labels. Check label encoding vs fixed_classes.")
+    if y_train.max() >= n_classes or y_val.max() >= n_classes or y_test.max() >= n_classes:
+        raise ValueError("Class labels exceed number of class_names.")
+
+    n_groups = len(np.unique(groups_train))
+    if n_groups < n_splits:
+        raise ValueError(f"Not enough groups for StratifiedGroupKFold: groups={n_groups}, n_splits={n_splits}.")
 
     cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     rng = np.random.RandomState(seed)
-
-    params_list = _draw_params(rng, n_iter)
+    params_list = draw_mlp_params(rng, n_iter, random_state=seed)
 
     candidates: List[Dict[str, Any]] = []
     if verbose:
         print(f"\nSearching {n_iter} MLP configs...")
 
     for i, params in enumerate(params_list, 1):
-        cv_mean, cv_std = _cv_macro_f1(
+        cv_mean, cv_std = cv_macro_f1(
             X=X_train, y=y_train, groups=groups_train, sample_w=sample_w, params=params, cv=cv
         )
 
         clf_full = MLPClassifier(**params)
-        _fit_maybe_weighted(clf_full, X_train, y_train, sample_w)
+        fit_maybe_weighted(clf_full, X_train, y_train, sample_w)
 
         val_pred = clf_full.predict(X_val)
         val_f1 = float(f1_score(y_val, val_pred, average="macro"))
         val_acc = float(accuracy_score(y_val, val_pred))
 
-        candidates.append(
-            {
-                "params": params,
-                "cv_mean": cv_mean,
-                "cv_std": cv_std,
-                "val_f1": val_f1,
-                "val_acc": val_acc,
-            }
-        )
+        candidates.append({"params": params, "cv_mean": cv_mean, "cv_std": cv_std, "val_f1": val_f1, "val_acc": val_acc})
 
         if verbose:
             print(
@@ -156,22 +114,21 @@ def train_mlp_classifier_with_search(
                 f"lr={params['learning_rate_init']:.1e}, bs={params['batch_size']}"
             )
 
-    candidates.sort(key=lambda c: (c["val_f1"], c["val_acc"], c["cv_mean"]), reverse=True)
+    candidates.sort(key=candidate_sort_key, reverse=True)
     best = candidates[0]
     best_params = best["params"]
 
     if verbose:
-        print("\n=== Top candidates (by VAL macro-F1) ===")
+        print("\n🏆 Selected params:", best_params)
+        print("\n=== Top 5 candidates ===")
         for c in candidates[:5]:
             print(
-                f"VAL F1={c['val_f1']:.3f} (acc={c['val_acc']:.3f}) | "
-                f"cvF1={c['cv_mean']:.3f}±{c['cv_std']:.3f} | params={c['params']}"
+                f"VAL F1={c['val_f1']:.3f} acc={c['val_acc']:.3f} | "
+                f"cvF1={c['cv_mean']:.3f}±{c['cv_std']:.3f}"
             )
-        print("\n🏆 Selected params:")
-        print(best_params)
 
     final_clf = MLPClassifier(**best_params)
-    _fit_maybe_weighted(final_clf, X_train, y_train, sample_w)
+    fit_maybe_weighted(final_clf, X_train, y_train, sample_w)
 
     # eval VAL
     val_hat = final_clf.predict(X_val)
@@ -185,11 +142,9 @@ def train_mlp_classifier_with_search(
 
     if verbose:
         for name, ys, yhat in [("VAL", y_val, val_hat), ("TEST", y_test, test_hat)]:
-            acc = float(accuracy_score(ys, yhat))
-            f1m = float(f1_score(ys, yhat, average="macro"))
             print(f"\n===== {name} =====")
-            print(f"{name}: acc={acc:.4f}  f1_macro={f1m:.4f}")
-            print(classification_report(ys, yhat, labels=np.arange(len(cn)), target_names=cn, zero_division=0))
+            print(f"{name}: acc={accuracy_score(ys, yhat):.4f}  f1_macro={f1_score(ys, yhat, average='macro'):.4f}")
+            print(classification_report(ys, yhat, labels=np.arange(n_classes), target_names=cn, zero_division=0))
             print("Confusion matrix:\n", confusion_matrix(ys, yhat))
 
     model_name = save_name or f"clf_{exp_name}.joblib"
@@ -201,12 +156,19 @@ def train_mlp_classifier_with_search(
             "class_names": cn,
             "best_params": best_params,
             "search_top5": candidates[:5],
+            "metrics": {
+                "val_acc": val_acc,
+                "val_f1_macro": val_f1m,
+                "test_acc": test_acc,
+                "test_f1_macro": test_f1m,
+            },
+            "search": {"n_iter": int(n_iter), "n_splits": int(n_splits), "seed": int(seed)},
         },
         model_path,
     )
 
     if verbose:
-        print(f"\n✅ Saved classifier to: {model_path}")
+        print(f"\nSaved classifier to: {model_path}")
 
     return ClassifierTrainResult(
         model_path=str(model_path),
