@@ -1,24 +1,40 @@
-#src/train/utils/_concat_features_utils.py
+# src/train/utils/_concat_features_utils.py
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import json
 import numpy as np
 import pandas as pd
 
 from src.mapvec.concat import concat_embeddings as ce
-from src.types import FeatureMode
+from src.constants import (
+    NA_TOKENS,
+    MAP_ID_WIDTH,
+    PROMPT_ID_WIDTH_DEFAULT,
+    PROMPTS_REQUIRED_COLS,
+    PROMPTS_TILE_ID_COL,
+    PROMPTS_MAP_ID_COL,
+    PROMPTS_PROMPT_ID_COL,
+    PROMPTS_TEXT_COL,
+    MAPS_ID_COL,
+    MAPS_REQUIRED_EXTENT_COLS,
+    EXTENT_DIAG_COL,
+    EXTENT_AREA_COL,
+    CONCAT_X_NAME_TEMPLATE,
+    CONCAT_PAIRS_NAME_TEMPLATE,
+    CONCAT_META_NAME_TEMPLATE,
+    FeatureMode,
+)
 
-_NA_TOKENS = {"", "nan", "none", "null"}
 
 def _to_string_series(s: pd.Series) -> pd.Series:
-    # pandas "string" dtype keeps NA nicely and avoids object quirks
+    """Pandas 'string' dtype keeps NA nicely and avoids object quirks."""
     return s.astype("string")
 
 
-def normalize_id_str(x: Any, *, width: int = 4) -> Optional[str]:
+def normalize_id_str(x: Any, *, width: int = MAP_ID_WIDTH) -> Optional[str]:
     """
     Normalize a single id (map_id / prompt_id) into a stable string key.
 
@@ -31,10 +47,10 @@ def normalize_id_str(x: Any, *, width: int = 4) -> Optional[str]:
         return None
 
     s = str(x).strip()
-    if s.lower() in _NA_TOKENS:
+    if s.lower() in NA_TOKENS:
         return None
 
-    # numeric-like strings -> int -> zfill
+    # digit-only -> zfill
     if s.isdigit():
         return s.zfill(int(width))
 
@@ -48,32 +64,33 @@ def normalize_id_str(x: Any, *, width: int = 4) -> Optional[str]:
 
     return s
 
-def normalize_map_id_series(s: pd.Series, *, width: int = 4) -> pd.Series:
+
+def normalize_map_id_series(s: pd.Series, *, width: int = MAP_ID_WIDTH) -> pd.Series:
     """
-    Normalize map_id column to stable string keys (zero-padded width, default 4).
+    Normalize map_id column to stable string keys (zero-padded width).
     Handles numeric Excel reads and keeps NA.
     """
     out = _to_string_series(s).str.strip()
-    out = out.mask(out.str.lower().isin(_NA_TOKENS), pd.NA)
+    out = out.mask(out.str.lower().isin(NA_TOKENS), pd.NA)
 
-    # if all numeric-like -> fast path
+    # If all numeric-like -> fast path
     num = pd.to_numeric(out, errors="coerce")
     if num.notna().all():
         return num.astype(int).astype(str).str.zfill(int(width)).astype("string")
 
-    # otherwise: zfill only digit-only rows
+    # Otherwise: zfill only digit-only rows
     m = out.notna() & out.str.fullmatch(r"\d+")
     out.loc[m] = out.loc[m].str.zfill(int(width))
     return out.astype("string")
 
 
-def normalize_prompt_id_series(s: pd.Series, *, width: int = 4) -> pd.Series:
+def normalize_prompt_id_series(s: pd.Series, *, width: int = PROMPT_ID_WIDTH_DEFAULT) -> pd.Series:
     """
-    Normalize prompt_id column to stable string keys (zero-padded width, default 4).
+    Normalize prompt_id column to stable string keys (zero-padded width).
     Handles numeric Excel reads and keeps NA.
     """
     out = _to_string_series(s).str.strip()
-    out = out.mask(out.str.lower().isin(_NA_TOKENS), pd.NA)
+    out = out.mask(out.str.lower().isin(NA_TOKENS), pd.NA)
 
     num = pd.to_numeric(out, errors="coerce")
     if num.notna().all():
@@ -82,6 +99,7 @@ def normalize_prompt_id_series(s: pd.Series, *, width: int = 4) -> pd.Series:
     m = out.notna() & out.str.fullmatch(r"\d+")
     out.loc[m] = out.loc[m].str.zfill(int(width))
     return out.astype("string")
+
 
 # --- mode helpers ---
 def uses_prompt(mode: FeatureMode) -> bool:
@@ -90,6 +108,7 @@ def uses_prompt(mode: FeatureMode) -> bool:
 
 def concat_map_and_prompt(mode: FeatureMode) -> bool:
     return mode in ("prompt_plus_map", "use_map", "openai_map")
+
 
 # --- loading ---
 def load_npz_E_and_ids(npz_path: Path) -> Tuple[np.ndarray, List[str]]:
@@ -100,18 +119,26 @@ def load_npz_E_and_ids(npz_path: Path) -> Tuple[np.ndarray, List[str]]:
 
 def build_pairs_from_prompts(prompts_pq: Path, *, prompt_id_width: int) -> pd.DataFrame:
     pairs = pd.read_parquet(prompts_pq)
-    need_cols = ["tile_id", "prompt_id", "text"]
+
+    need_cols = PROMPTS_REQUIRED_COLS
     missing = [c for c in need_cols if c not in pairs.columns]
     if missing:
         raise RuntimeError(f"prompts.parquet missing required columns: {missing}")
 
-    pairs = pairs.rename(columns={"tile_id": "map_id"})[["map_id", "prompt_id", "text"]].copy()
-    pairs["map_id"] = normalize_map_id_series(pairs["map_id"], width=4)
-    pairs["prompt_id"] = normalize_prompt_id_series(pairs["prompt_id"], width=prompt_id_width)
+    # Rename tile_id -> map_id and keep canonical cols
+    pairs = (
+        pairs.rename(columns={PROMPTS_TILE_ID_COL: PROMPTS_MAP_ID_COL})[
+            [PROMPTS_MAP_ID_COL, PROMPTS_PROMPT_ID_COL, PROMPTS_TEXT_COL]
+        ]
+        .copy()
+    )
 
-    pairs = pairs.dropna(subset=["map_id", "prompt_id"])
-    pairs = pairs[(pairs["map_id"] != "") & (pairs["prompt_id"] != "")]
-    pairs = pairs.drop_duplicates(subset=["map_id", "prompt_id"]).reset_index(drop=True)
+    pairs[PROMPTS_MAP_ID_COL] = normalize_map_id_series(pairs[PROMPTS_MAP_ID_COL], width=MAP_ID_WIDTH)
+    pairs[PROMPTS_PROMPT_ID_COL] = normalize_prompt_id_series(pairs[PROMPTS_PROMPT_ID_COL], width=prompt_id_width)
+
+    pairs = pairs.dropna(subset=[PROMPTS_MAP_ID_COL, PROMPTS_PROMPT_ID_COL])
+    pairs = pairs[(pairs[PROMPTS_MAP_ID_COL] != "") & (pairs[PROMPTS_PROMPT_ID_COL] != "")]
+    pairs = pairs.drop_duplicates(subset=[PROMPTS_MAP_ID_COL, PROMPTS_PROMPT_ID_COL]).reset_index(drop=True)
     return pairs
 
 
@@ -122,28 +149,30 @@ def merge_extents_from_maps(
     extent_cols_preferred: Sequence[str],
 ) -> Tuple[pd.DataFrame, List[str], int]:
     maps_df = pd.read_parquet(maps_pq)
-    if "map_id" not in maps_df.columns:
-        raise RuntimeError("maps.parquet must contain 'map_id'.")
+
+    if MAPS_ID_COL not in maps_df.columns:
+        raise RuntimeError(f"maps.parquet must contain '{MAPS_ID_COL}'.")
 
     maps_df = maps_df.copy()
-    maps_df["map_id"] = normalize_map_id_series(maps_df["map_id"], width=4)
+    maps_df[MAPS_ID_COL] = normalize_map_id_series(maps_df[MAPS_ID_COL], width=MAP_ID_WIDTH)
 
-    required = ["map_id", "extent_diag_m", "extent_area_m2"]
+    required = [MAPS_ID_COL] + list(MAPS_REQUIRED_EXTENT_COLS)
     missing = [c for c in required if c not in maps_df.columns]
     if missing:
         raise RuntimeError(f"maps.parquet is missing required extent columns: {missing}")
 
+    # Keep only preferred cols that exist, but always include MAPS_ID_COL
     extent_cols = [c for c in extent_cols_preferred if c in maps_df.columns]
-    if "map_id" not in extent_cols:
-        extent_cols = ["map_id"] + extent_cols
+    if MAPS_ID_COL not in extent_cols:
+        extent_cols = [MAPS_ID_COL] + extent_cols
 
-    out = pairs.merge(maps_df[extent_cols], on="map_id", how="left")
+    out = pairs.merge(maps_df[extent_cols], on=MAPS_ID_COL, how="left")
 
-    n_missing = int(out["extent_diag_m"].isna().sum())
+    n_missing = int(out[EXTENT_DIAG_COL].isna().sum())
     if n_missing:
-        out = out.dropna(subset=["extent_diag_m", "extent_area_m2"]).reset_index(drop=True)
+        out = out.dropna(subset=[EXTENT_DIAG_COL, EXTENT_AREA_COL]).reset_index(drop=True)
 
-    saved = [c for c in extent_cols if c != "map_id"]
+    saved = [c for c in extent_cols if c != MAPS_ID_COL]
     return out, saved, n_missing
 
 
@@ -155,7 +184,7 @@ def match_pairs_to_embedding_indices(
     prm_ids: Optional[List[str]],
     prompt_id_width: int,
 ) -> Tuple[List[int], List[int], List[int], int]:
-    map_ids_n = [str(x).strip().zfill(4) for x in map_ids]
+    map_ids_n = [str(x).strip().zfill(MAP_ID_WIDTH) for x in map_ids]
     idx_map = {k: i for i, k in enumerate(map_ids_n)}
 
     idx_prm: Dict[str, int] = {}
@@ -171,7 +200,7 @@ def match_pairs_to_embedding_indices(
     missing_ids = 0
 
     for i, row in enumerate(pairs.itertuples(index=False), start=0):
-        mid = str(row.map_id).strip().zfill(4)
+        mid = str(getattr(row, PROMPTS_MAP_ID_COL)).strip().zfill(MAP_ID_WIDTH)
         im = idx_map.get(mid)
 
         if feature_mode == "map_only":
@@ -183,7 +212,7 @@ def match_pairs_to_embedding_indices(
             continue
 
         # prompt-based
-        pid_raw = str(row.prompt_id).strip()
+        pid_raw = str(getattr(row, PROMPTS_PROMPT_ID_COL)).strip()
         pid = pid_raw.zfill(prompt_id_width) if pid_raw.isdigit() else pid_raw
         ip = idx_prm.get(pid)
 
@@ -246,9 +275,9 @@ def write_concat_outputs(
 ) -> Tuple[str, str, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    X_name = save_X_name or f"X_{exp_name}.npy"
-    pairs_name = save_pairs_name or f"train_pairs_{exp_name}.parquet"
-    meta_name = save_meta_name or f"meta_{exp_name}.json"
+    X_name = save_X_name or CONCAT_X_NAME_TEMPLATE.format(exp_name=exp_name)
+    pairs_name = save_pairs_name or CONCAT_PAIRS_NAME_TEMPLATE.format(exp_name=exp_name)
+    meta_name = save_meta_name or CONCAT_META_NAME_TEMPLATE.format(exp_name=exp_name)
 
     X_path = out_dir / X_name
     pairs_path = out_dir / pairs_name

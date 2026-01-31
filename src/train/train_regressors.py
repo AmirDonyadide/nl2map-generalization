@@ -1,4 +1,4 @@
-#src/train/train_regressors.py
+# src/train/train_regressors.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,6 +10,26 @@ from scipy.stats import loguniform
 from sklearn.model_selection import GroupKFold, RandomizedSearchCV
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
+
+from src.constants import (
+    MAPS_ID_COL,
+    PARAM_TARGET_NAME,
+    REG_USE_LOG1P_DEFAULT,
+    REG_N_SPLITS_DEFAULT,
+    REG_N_ITER_DEFAULT,
+    REG_RANDOM_STATE_DEFAULT,
+    REG_VERBOSE_DEFAULT,
+    REG_MIN_SAMPLES_PER_CLASS,
+    REG_MLP_BASE_PARAMS,
+    REG_HIDDEN_LAYER_CANDIDATES,
+    REG_ALPHA_BOUNDS,
+    REG_LR_INIT_BOUNDS,
+    REG_SCORING,
+    REG_N_JOBS,
+    REG_REFIT_MAX_ITER,
+    REG_REFIT_EARLY_STOPPING,
+    REG_TOL_DEFAULT,
+)
 
 from .utils._regressor_utils import fit_reg_maybe_weighted
 
@@ -28,13 +48,13 @@ def train_regressors_per_operator(
     y_train_cls: np.ndarray,
     class_names: Sequence[str],
     sample_w: np.ndarray,
-    group_col: str = "map_id",
-    target_col: str = "param_norm",
-    use_log1p: bool = False,
-    n_splits: int = 5,
-    n_iter: int = 40,
-    random_state: int = 42,
-    verbose: int = 1,
+    group_col: str = MAPS_ID_COL,
+    target_col: str = PARAM_TARGET_NAME,
+    use_log1p: bool = REG_USE_LOG1P_DEFAULT,
+    n_splits: int = REG_N_SPLITS_DEFAULT,
+    n_iter: int = REG_N_ITER_DEFAULT,
+    random_state: int = REG_RANDOM_STATE_DEFAULT,
+    verbose: int = REG_VERBOSE_DEFAULT,
 ) -> RegressorTrainResult:
     """
     Train one MLPRegressor per operator to predict target_col (default: param_norm).
@@ -43,10 +63,6 @@ def train_regressors_per_operator(
     - Per-operator StandardScaler on the target
     - GroupKFold by group_col to avoid leakage
     - RandomizedSearchCV over MLPRegressor hyperparameters
-
-    Returns:
-      regressors_by_class: {operator: (regressor, target_scaler)}
-      cv_summary: per-class best params and CV RMSE estimates
     """
     if group_col not in df_train.columns:
         raise KeyError(f"df_train missing group_col '{group_col}'")
@@ -78,22 +94,12 @@ def train_regressors_per_operator(
     if n_splits < 2:
         raise ValueError("n_splits must be >= 2.")
 
-    base_reg = MLPRegressor(
-        activation="relu",
-        solver="adam",
-        learning_rate="adaptive",
-        early_stopping=False,
-        max_iter=2000,
-        tol=1e-3,
-        random_state=random_state,
-        verbose=False,
-        batch_size="auto",
-    )
+    base_reg = MLPRegressor(**{**REG_MLP_BASE_PARAMS, "random_state": int(random_state)})
 
     param_dist_reg = {
-        "hidden_layer_sizes": [(64,), (128,), (256,), (128, 64), (256, 128)],
-        "alpha": loguniform(1e-6, 3e-2),
-        "learning_rate_init": loguniform(1e-4, 3e-3),
+        "hidden_layer_sizes": list(REG_HIDDEN_LAYER_CANDIDATES),
+        "alpha": loguniform(float(REG_ALPHA_BOUNDS[0]), float(REG_ALPHA_BOUNDS[1])),
+        "learning_rate_init": loguniform(float(REG_LR_INIT_BOUNDS[0]), float(REG_LR_INIT_BOUNDS[1])),
     }
 
     regressors: Dict[str, Tuple[Any, Any]] = {}
@@ -111,7 +117,7 @@ def train_regressors_per_operator(
         n_samples = int(Xk.shape[0])
         n_groups = int(len(np.unique(gk_tr)))
 
-        if n_samples < 10:
+        if n_samples < int(REG_MIN_SAMPLES_PER_CLASS):
             if verbose:
                 print(f"⚠️ Skipping class '{op}' (too few samples: {n_samples}).")
             continue
@@ -133,9 +139,9 @@ def train_regressors_per_operator(
             estimator=base_reg,
             param_distributions=param_dist_reg,
             n_iter=int(n_iter),
-            scoring="neg_root_mean_squared_error",
+            scoring=str(REG_SCORING),
             cv=splits,
-            n_jobs=-1,
+            n_jobs=int(REG_N_JOBS),
             refit=True,
             random_state=int(random_state),
             verbose=int(verbose),
@@ -155,7 +161,10 @@ def train_regressors_per_operator(
 
         if verbose:
             print(f"\n=== Regressor for class '{op}' (predicting {target_col}) ===")
-            print(f"samples={n_samples}, groups={n_groups}, cv_splits={n_splits_eff}, used_sample_weight={used_w_search}")
+            print(
+                f"samples={n_samples}, groups={n_groups}, cv_splits={n_splits_eff}, "
+                f"used_sample_weight={used_w_search}"
+            )
             print("best CV RMSE (scaled):", rmse_scaled)
             print("best CV RMSE (param_norm units):", rmse_norm_units)
             print("best params:", search.best_params_)
@@ -173,8 +182,9 @@ def train_regressors_per_operator(
         reg_full = MLPRegressor(
             **{
                 **search.best_estimator_.get_params(),
-                "early_stopping": False,
-                "max_iter": 2000,
+                "early_stopping": bool(REG_REFIT_EARLY_STOPPING),
+                "max_iter": int(REG_REFIT_MAX_ITER),
+                "tol": float(REG_TOL_DEFAULT),
                 "random_state": int(random_state),
             }
         )

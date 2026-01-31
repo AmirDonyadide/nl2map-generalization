@@ -1,10 +1,10 @@
-# src/mapvec/maps/map_embeddings.py 
+# src/mapvec/maps/map_embeddings.py
 # Compute fixed-length map vectors from GeoJSONs and save artifacts.
 # Drop-in compatible with the original script (same CLI, defaults, outputs).
 
 from __future__ import annotations
 
-import sys, json, argparse, logging
+import sys, json, argparse, logging, warnings
 from pathlib import Path
 from typing import Iterator, Tuple, List, Dict
 
@@ -14,28 +14,73 @@ import geopandas as gpd
 
 from shapely.geometry import Polygon, MultiPolygon
 
-# ↳ local modules (unchanged import paths)
 from src.mapvec.features.polygon_features import embed_polygons_handcrafted
 from src.mapvec.features.map_pooling import pool_map_embedding
 
-import warnings
-warnings.filterwarnings("ignore", message="invalid value encountered in within")
-warnings.filterwarnings("ignore", message="invalid value encountered in contains")
-warnings.filterwarnings("ignore", message="invalid value encountered in buffer")
+from src.constants import (
+    # repo/data roots
+    PROJECT_ROOT_MARKER_LEVELS_UP,
+    DEFAULT_DATA_DIRNAME,
+    # mapvec default paths
+    MAP_EMBED_ROOT_DEFAULT,
+    MAP_EMBED_PATTERN_DEFAULT,
+    MAP_EMBED_OUTDIR_DEFAULT,
+    MAP_EMBED_VERBOSE_DEFAULT,
+    MAP_EMBED_SAVE_CSV_DEFAULT,
+    # normalization defaults
+    POLY_NORM_MODE_DEFAULT,
+    POLY_NORM_FIXED_WH_DEFAULT,
+    MAP_EMBED_PROJECT_IF_GEOGRAPHIC,
+    MAP_EMBED_GEOGRAPHIC_CRS_EPSG,
+    MAP_EMBED_METRIC_CRS_EPSG,
+    # numeric eps + filtering
+    EPS_POSITIVE,
+    MAP_POLY_AREA_EPS,
+    # warning filters
+    MAP_EMBED_WARNINGS_TO_IGNORE,
+    # schema / columns / filenames
+    MAPS_ID_COL,
+    MAP_GEOJSON_COL,
+    MAP_N_POLYGONS_COL,
+    MAP_EMBEDDINGS_NPZ_NAME,
+    MAPS_PARQUET_NAME,
+    MAPS_CSV_NAME,
+    MAPS_META_JSON_NAME,
+    MAPS_FEATURE_NAMES_JSON_NAME,
+    # extent columns
+    EXTENT_MINX_COL,
+    EXTENT_MINY_COL,
+    EXTENT_MAXX_COL,
+    EXTENT_MAXY_COL,
+    EXTENT_WIDTH_COL,
+    EXTENT_HEIGHT_COL,
+    EXTENT_DIAG_COL,
+    EXTENT_AREA_COL,
+    # pooling defaults (already moved in previous steps)
+    MAP_POOL_EXCLUDE_COLS_DEFAULT,
+    MAP_POOL_STATS_DEFAULT,
+    MAP_POOL_QUANTILES_DEFAULT,
+    MAP_POOL_ADD_GLOBALS_DEFAULT,
+)
 
-# ----------------------- paths & logging -----------------------
-PROJECT_ROOT = Path(__file__).resolve().parents[3]  # …/CODES
-DATA_DIR     = (PROJECT_ROOT / "data").resolve()
+# Apply warning filters (keeps logs readable on messy geometries)
+for msg in MAP_EMBED_WARNINGS_TO_IGNORE:
+    warnings.filterwarnings("ignore", message=msg)
+
+# ----------------------- paths -----------------------
+PROJECT_ROOT = Path(__file__).resolve().parents[int(PROJECT_ROOT_MARKER_LEVELS_UP)]
+DATA_DIR = (PROJECT_ROOT / DEFAULT_DATA_DIRNAME).resolve()
+
 
 def _resolve(p: str | Path) -> Path:
     p = Path(p)
     if p.is_absolute():
         return p
-    # prefer CWD; if missing, try under data/
     cand = (Path.cwd() / p).resolve()
     return cand if cand.exists() or cand.parent.exists() else (DATA_DIR / p).resolve()
 
-def setup_logging(verbosity: int = 1):
+
+def setup_logging(verbosity: int = MAP_EMBED_VERBOSE_DEFAULT) -> None:
     level = logging.WARNING if verbosity <= 0 else (logging.INFO if verbosity == 1 else logging.DEBUG)
     logging.basicConfig(
         level=level,
@@ -45,11 +90,12 @@ def setup_logging(verbosity: int = 1):
     logging.debug("PROJECT_ROOT=%s", PROJECT_ROOT)
     logging.debug("DATA_DIR=%s", DATA_DIR)
 
+
 # ----------------------- core helpers -----------------------
 def find_geojsons(root: Path, pattern: str) -> Iterator[Tuple[str, Path]]:
     """
     Yield (map_id, path) for every subfolder in `root` that has a file matching `pattern`.
-    Example subfolder: data/samples/pairs/0001/0001_input.geojson
+    Example: data/samples/pairs/0001/0001_input.geojson
     """
     if not root.exists():
         return
@@ -60,52 +106,55 @@ def find_geojsons(root: Path, pattern: str) -> Iterator[Tuple[str, Path]]:
             continue
         yield sub.name, hits[0]
 
+
 def _read_geo(gj_path: Path) -> gpd.GeoDataFrame:
     """Read a vector file robustly; filter empties/nulls."""
-    # gpd.read_file handles many formats (GeoJSON, GPKG, Shapefile, etc.)
-    gdf = gpd.read_file(gj_path) 
-    # If CRS missing, assume WGS84 (typical for GeoJSON) so we can safely project later
+    gdf = gpd.read_file(gj_path)
+
+    # If CRS missing, assume WGS84 (typical for GeoJSON)
     if gdf.crs is None:
-        gdf = gdf.set_crs(4326)
+        gdf = gdf.set_crs(MAP_EMBED_GEOGRAPHIC_CRS_EPSG)
+
     if gdf.empty:
         raise ValueError("GeoDataFrame is empty.")
     if "geometry" not in gdf.columns:
         raise ValueError("No 'geometry' column found.")
-    # filter invalid/empty/null geometry rows
+
     gdf = gdf[gdf.geometry.notnull()].copy()
     if "is_empty" in dir(gdf.geometry):  # geopandas>=0.10
         gdf = gdf[~gdf.geometry.is_empty].copy()
     else:
         gdf = gdf[[not geom.is_empty for geom in gdf.geometry]].copy()
+
     if gdf.empty:
         raise ValueError("All geometries were empty/invalid.")
     return gdf
 
-def compute_extent_refs(gj_path: Path) -> Dict[str, float]:
-    """
-    Compute per-map extent metrics.
-    Returns width/height/diag/area computed from GeoDataFrame total_bounds.
 
-    IMPORTANT:
-    - If CRS is geographic (lat/lon), we project to EPSG:3857 (meters).
-    - If CRS is missing or not geographic, we do NOT force a CRS; we just compute bounds.
-      (In your dataset, you said values are in meters already → this is fine.)
-    """
-    gdf = _read_geo(gj_path)
-
-    # If CRS is geographic, project to meters
+def _maybe_project_to_meters(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Project geographic CRS to metric CRS for distance/area-consistent measures."""
+    if not MAP_EMBED_PROJECT_IF_GEOGRAPHIC:
+        return gdf
     try:
         if gdf.crs and getattr(gdf.crs, "is_geographic", False):
-            gdf = gdf.to_crs(3857)
+            return gdf.to_crs(MAP_EMBED_METRIC_CRS_EPSG)
     except Exception:
         pass
+    return gdf
 
+
+def compute_extent_refs(gj_path: Path) -> Dict[str, float]:
+    """
+    Compute per-map extent metrics from total_bounds.
+
+    If CRS is geographic and MAP_EMBED_PROJECT_IF_GEOGRAPHIC is True, project to meters first.
+    """
+    gdf = _maybe_project_to_meters(_read_geo(gj_path))
     minx, miny, maxx, maxy = map(float, gdf.total_bounds)
 
     w = maxx - minx
     h = maxy - miny
 
-    # guard against degenerate
     if not np.isfinite(w) or w < 0:
         w = float("nan")
     if not np.isfinite(h) or h < 0:
@@ -115,15 +164,16 @@ def compute_extent_refs(gj_path: Path) -> Dict[str, float]:
     area = float(w * h) if np.isfinite(w) and np.isfinite(h) else float("nan")
 
     return {
-        "extent_minx": float(minx),
-        "extent_miny": float(miny),
-        "extent_maxx": float(maxx),
-        "extent_maxy": float(maxy),
-        "extent_width_m": float(w),
-        "extent_height_m": float(h),
-        "extent_diag_m": float(diag),
-        "extent_area_m2": float(area),
+        EXTENT_MINX_COL: float(minx),
+        EXTENT_MINY_COL: float(miny),
+        EXTENT_MAXX_COL: float(maxx),
+        EXTENT_MAXY_COL: float(maxy),
+        EXTENT_WIDTH_COL: float(w),
+        EXTENT_HEIGHT_COL: float(h),
+        EXTENT_DIAG_COL: float(diag),
+        EXTENT_AREA_COL: float(area),
     }
+
 
 def _iter_polygons(geom):
     """Yield Polygon parts from any geometry (Polygon, MultiPolygon, GeometryCollection)."""
@@ -140,18 +190,15 @@ def _iter_polygons(geom):
         for g in geom.geoms:
             yield from _iter_polygons(g)
     else:
-        # ignore Points/Lines, etc.
         return
 
 
 def _fix_polygon(poly: Polygon) -> Polygon | None:
     """Try to repair/clean a polygon; return None if still bad."""
     try:
-        # buffer(0) repairs many self-intersections
         p = poly.buffer(0)
         if not p.is_valid or p.is_empty:
             return None
-        # Sometimes buffer(0) returns MultiPolygon; keep largest area part
         if isinstance(p, MultiPolygon):
             parts = [q for q in p.geoms if q.is_valid and not q.is_empty]
             if not parts:
@@ -161,62 +208,60 @@ def _fix_polygon(poly: Polygon) -> Polygon | None:
     except Exception:
         return None
 
-def _count_valid_polygons(gj_path: Path) -> int:
-    """Read, clean, and count valid polygon parts in a single map file."""
-    gdf = _read_geo(gj_path)
-    try:
-        if gdf.crs and getattr(gdf.crs, "is_geographic", False):
-            gdf = gdf.to_crs(3857)
-    except Exception:
-        pass
-    geoms = _flatten_and_clean_to_polygons(gdf)
-    return len(geoms)
 
-def _flatten_and_clean_to_polygons(gdf, area_eps=1e-12):
+def _flatten_and_clean_to_polygons(gdf: gpd.GeoDataFrame, *, area_eps: float = MAP_POLY_AREA_EPS) -> List[Polygon]:
     """Return a list of valid Polygons suitable for feature extraction."""
-    polys = []
+    polys: List[Polygon] = []
     for geom in gdf.geometry:
         for p in _iter_polygons(geom):
             p2 = _fix_polygon(p)
             if p2 is None:
                 continue
-            # drop tiny slivers / NaN-ish geometries
-            if not np.isfinite(p2.area) or p2.area <= area_eps:
+            if not np.isfinite(p2.area) or p2.area <= float(area_eps):
                 continue
             polys.append(p2)
     return polys
 
-def embed_one_map(gj_path: Path, max_polygons: int | float | None = None,norm: str = "extent", norm_wh: str | None = None
-                  ) -> Tuple[np.ndarray, List[str]]:
-    gdf = _read_geo(gj_path)
 
-    try:
-        if gdf.crs and getattr(gdf.crs, "is_geographic", False):
-            gdf = gdf.to_crs(3857)  # Web Mercator: meters
-    except Exception:
-        pass
-
+def _count_valid_polygons(gj_path: Path) -> int:
+    """Read, clean, and count valid polygon parts in a single map file."""
+    gdf = _maybe_project_to_meters(_read_geo(gj_path))
     geoms = _flatten_and_clean_to_polygons(gdf)
-    if len(geoms) == 0:
-        raise ValueError("No valid polygon parts after flatten/clean (all invalid/empty?).")
+    return len(geoms)
 
-    # Parse norm_wh when provided (e.g., "400x400")
-    _fixed = None
+
+def embed_one_map(
+    gj_path: Path,
+    *,
+    max_polygons: int | float | None = None,
+    norm: str = POLY_NORM_MODE_DEFAULT,
+    norm_wh: str | None = None,
+) -> Tuple[np.ndarray, List[str]]:
+    gdf = _maybe_project_to_meters(_read_geo(gj_path))
+    geoms = _flatten_and_clean_to_polygons(gdf)
+
+    if len(geoms) == 0:
+        raise ValueError("No valid polygon parts after flatten/clean.")
+
+    # Parse norm_wh (e.g., "400x400") only if norm == "fixed"
+    fixed = None
     if norm == "fixed":
         if not norm_wh or "x" not in norm_wh.lower():
             raise ValueError("Use --norm-wh like '400x400' with --norm=fixed")
         w_str, h_str = norm_wh.lower().split("x", 1)
-        _fixed = (float(w_str), float(h_str))
+        fixed = (float(w_str), float(h_str))
+    else:
+        fixed = None
 
-    df_polys = embed_polygons_handcrafted(geoms, norm_mode=norm, fixed_wh=_fixed)    
+    df_polys = embed_polygons_handcrafted(geoms, norm_mode=norm, fixed_wh=fixed)
 
     vec, names = pool_map_embedding(
         df_polys,
-        exclude=("id",),
-        stats=("mean", "std", "min", "max"),
-        quantiles=(0.25, 0.50, 0.75),
-        add_globals=True,
-        max_polygons=max_polygons,   # <-- NEW
+        exclude=MAP_POOL_EXCLUDE_COLS_DEFAULT,
+        stats=MAP_POOL_STATS_DEFAULT,
+        quantiles=MAP_POOL_QUANTILES_DEFAULT,
+        add_globals=MAP_POOL_ADD_GLOBALS_DEFAULT,
+        max_polygons=max_polygons,
     )
 
     if vec is None or vec.size == 0:
@@ -226,33 +271,15 @@ def embed_one_map(gj_path: Path, max_polygons: int | float | None = None,norm: s
 
     return vec, list(names or [])
 
-def maybe_read_tile_meta(sample_dir: Path) -> Dict:
-    """
-    Optional: collect metadata from data/samples/metadata/meta.csv using the numeric sample_id (=folder name).
-    Returns {} if not found or on failure.
-    """
-    try:
-        meta_csv = DATA_DIR / "samples" / "metadata" / "meta.csv"
-        if meta_csv.exists():
-            dfm = pd.read_csv(meta_csv)
-            sid = int(sample_dir.name)
-            row = dfm.loc[dfm["sample_id"] == sid]
-            if not row.empty:
-                return row.iloc[0].to_dict()
-    except Exception as e:
-        logging.debug("Meta read failed for %s: %s", sample_dir, e)
-    return {}
 
 def _safe_parquet_write(df: pd.DataFrame, out_path: Path) -> None:
-    """
-    Try writing parquet; if pyarrow/fastparquet is missing, fall back to CSV next to it.
-    This preserves usability without adding hard deps.
-    """
+    """Write parquet; if not available, fall back to CSV next to it."""
     try:
         df.to_parquet(out_path, index=False)
     except Exception as e:
         logging.warning("Parquet write failed (%s). Writing CSV fallback.", e)
         df.to_csv(out_path.with_suffix(".csv"), index=False)
+
 
 def save_outputs(
     out_dir: Path,
@@ -265,58 +292,49 @@ def save_outputs(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) embeddings (npz)
-    try:
-        np.savez_compressed(out_dir / "maps_embeddings.npz", E=E.astype(np.float32, copy=False), ids=np.array(ids, dtype=object))
-    except Exception as e:
-        logging.error("Failed to save maps_embeddings.npz: %s", e)
-        raise
+    np.savez_compressed(
+        out_dir / MAP_EMBEDDINGS_NPZ_NAME,
+        E=E.astype(np.float32, copy=False),
+        ids=np.array(ids, dtype=object),
+    )
 
-    # 2) table of maps (light metadata)
+    # 2) maps table
     df = pd.DataFrame(rows)
-    _safe_parquet_write(df, out_dir / "maps.parquet")
+    _safe_parquet_write(df, out_dir / MAPS_PARQUET_NAME)
+
     if save_csv:
-        try:
-            df.to_csv(out_dir / "maps.csv", index=False)
-        except Exception as e:
-            logging.warning("Failed to save maps.csv: %s", e)
+        df.to_csv(out_dir / MAPS_CSV_NAME, index=False)
 
     # 3) meta + feature names
     meta = {
         "dim": int(E.shape[1]),
         "count": int(E.shape[0]),
         "files": {
-            "maps_embeddings_npz": "maps_embeddings.npz",
-            "maps_parquet": "maps.parquet",  # may have CSV fallback
+            "maps_embeddings_npz": MAP_EMBEDDINGS_NPZ_NAME,
+            "maps_parquet": MAPS_PARQUET_NAME,
         },
         "vector_schema": "pooled stats over per-polygon features",
     }
-    try:
-        (out_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        (out_dir / "feature_names.json").write_text(json.dumps(feat_names, indent=2), encoding="utf-8")
-    except Exception as e:
-        logging.warning("Failed to save JSON sidecars: %s", e)
+    (out_dir / MAPS_META_JSON_NAME).write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    (out_dir / MAPS_FEATURE_NAMES_JSON_NAME).write_text(json.dumps(feat_names, indent=2), encoding="utf-8")
+
 
 # ----------------------- CLI -----------------------
 def main():
     ap = argparse.ArgumentParser(description="Compute fixed-D map embeddings from GeoJSON tiles.")
-    ap.add_argument("--norm", choices=["extent","fixed"], default="extent",
-                    help="Normalization scale: per-tile extent (default) or fixed width/height.")
-    ap.add_argument("--norm-wh", type=str, default=None,
-                    help="WidthxHeight in meters when --norm=fixed, e.g. '400x400'.")
+    ap.add_argument("--norm", choices=["extent", "fixed"], default=POLY_NORM_MODE_DEFAULT)
+    ap.add_argument("--norm-wh", type=str, default=None, help="WidthxHeight when --norm=fixed, e.g. '400x400'.")
 
-    ap.add_argument("--root", type=str, default=str(DATA_DIR / "samples" / "pairs"),
-                    help="Root folder with <map_id>/ subfolders (default: data/samples/pairs).")
-    ap.add_argument("--pattern", type=str, default="*_input.geojson",
-                    help="Glob pattern per <map_id> dir (e.g. '*_generalized.geojson').")
-    ap.add_argument("--out_dir", type=str, default=str(DATA_DIR / "map_out"),
-                    help="Output directory (default: data/map_out).")
-    ap.add_argument("--save_csv", action="store_true", help="Also save maps.csv.")
-    ap.add_argument("-v", "--verbose", action="count", default=1, help="Increase verbosity (-v, -vv).")
+    ap.add_argument("--root", type=str, default=str(DATA_DIR / MAP_EMBED_ROOT_DEFAULT))
+    ap.add_argument("--pattern", type=str, default=str(MAP_EMBED_PATTERN_DEFAULT))
+    ap.add_argument("--out_dir", type=str, default=str(DATA_DIR / MAP_EMBED_OUTDIR_DEFAULT))
+    ap.add_argument("--save_csv", action="store_true", default=MAP_EMBED_SAVE_CSV_DEFAULT)
+    ap.add_argument("-v", "--verbose", action="count", default=MAP_EMBED_VERBOSE_DEFAULT)
+
     args = ap.parse_args()
+    setup_logging(int(args.verbose))
 
-    setup_logging(args.verbose)
-
-    root   = _resolve(args.root)
+    root = _resolve(args.root)
     outdir = _resolve(args.out_dir)
 
     if not root.exists():
@@ -325,112 +343,59 @@ def main():
 
     logging.info("Scanning %s (pattern=%s)…", root, args.pattern)
 
-    # Collect all candidates once so we can do two passes
     pairs = list(find_geojsons(root, args.pattern))
     if not pairs:
         logging.error("No GeoJSONs embedded. Check --root and --pattern.")
         sys.exit(2)
-    # --- Optional: filter map_ids using UserStudy.xlsx ---
-    try:
-        from src.config import PATHS  # uses your config.py
-        dfu = pd.read_excel(PATHS.USER_STUDY_XLSX, sheet_name=PATHS.RESPONSES_SHEET)
 
-        # Keep only complete=True and remove=False
-        dfu[PATHS.COMPLETE_COL] = dfu[PATHS.COMPLETE_COL].astype(bool)
-        dfu[PATHS.REMOVE_COL]   = dfu[PATHS.REMOVE_COL].astype(bool)
-
-        mask = pd.Series(True, index=dfu.index)
-        if PATHS.ONLY_COMPLETE:
-            mask &= (dfu[PATHS.COMPLETE_COL] == True)
-        if PATHS.EXCLUDE_REMOVED:
-            mask &= (dfu[PATHS.REMOVE_COL] == False)
-        dfu = dfu[mask].copy()
-
-        # Allowed tile_ids (map_ids)
-        tile_raw = dfu[PATHS.TILE_ID_COL]
-        tile_num = pd.to_numeric(tile_raw, errors="coerce")
-
-        if tile_num.notna().all():
-            # ZERO-PAD to match folder names like 0001
-            allowed_tile_ids = set(tile_num.astype(int).astype(str).str.zfill(4))
-        else:
-            allowed_tile_ids = set(
-                tile_raw.astype(str).str.strip().str.zfill(4)
-            )
-
-        before = len(pairs)
-        pairs = [(map_id, path) for (map_id, path) in pairs if str(map_id).strip() in allowed_tile_ids]
-        after = len(pairs)
-
-        logging.info("Filtered maps by UserStudy.xlsx: %d -> %d", before, after)
-
-        if after == 0:
-            logging.error("After Excel filtering, there are no maps left to embed.")
-            sys.exit(2)
-
-    except Exception as e:
-        logging.warning("Excel-based filtering skipped (reason: %s). Embedding all maps in root.", e)
-
-
-    # ---------- First pass: compute dataset-wide max_polygons ----------
+    # First pass: dataset-wide max_polygons (for normalized poly_count)
     logging.info("First pass: counting polygons to normalize poly_count…")
     counts: Dict[str, int] = {}
     for map_id, path in pairs:
         try:
-            counts[map_id] = _count_valid_polygons(path)
+            counts[str(map_id)] = _count_valid_polygons(path)
         except Exception as e:
             logging.warning("Count failed for %s: %s", map_id, e)
-            counts[map_id] = 0
+            counts[str(map_id)] = 0
+
     max_polygons = max(max(counts.values()), 1)
     logging.info("Max polygons across dataset: %d", max_polygons)
 
-    # ---------- Second pass: embed with normalized poly_count ----------
+    # Second pass: embed
     ids: List[str] = []
     vecs: List[np.ndarray] = []
     rows: List[Dict] = []
     feat_names: List[str] | None = None
-
-    total = 0
-    failed = 0
     first_dim: int | None = None
+    failed = 0
 
     for map_id, path in pairs:
-        total += 1
         try:
-            vec, names = embed_one_map(path, max_polygons=max_polygons,norm=args.norm, norm_wh=args.norm_wh)
-            # ensure consistent dimensionality across tiles
+            vec, names = embed_one_map(path, max_polygons=max_polygons, norm=args.norm, norm_wh=args.norm_wh)
+
             if first_dim is None:
                 first_dim = int(vec.shape[0])
                 feat_names = list(names)
                 if not feat_names or len(feat_names) != first_dim:
-                    logging.debug("Feature names length mismatch; using index-derived names.")
                     feat_names = [f"f{i:03d}" for i in range(first_dim)]
             elif vec.shape[0] != first_dim:
                 failed += 1
                 logging.error("Skipping %s: vector dim %d != expected %d", map_id, vec.shape[0], first_dim)
                 continue
 
-            ids.append(map_id)
+            ids.append(str(map_id))
             vecs.append(vec)
-
-            meta = maybe_read_tile_meta(path.parent)
 
             extent = compute_extent_refs(path)
 
-            rows.append({
-                "map_id": map_id,
-                "geojson": str(path),
-                "n_polygons": int(counts.get(map_id, 0)),
-
-                # NEW: save extent metrics into maps.parquet
-                **extent,
-
-                **{k: meta.get(k) for k in (
-                    "operator","intensity","param_value","param_unit",
-                    "input_png","target_png","input_geojson","target_geojson",
-                    "n_input_polys","n_target_polys","is_target_empty"
-                ) if k in meta}
-            })
+            rows.append(
+                {
+                    MAPS_ID_COL: str(map_id),
+                    MAP_GEOJSON_COL: str(path),
+                    MAP_N_POLYGONS_COL: int(counts.get(str(map_id), 0)),
+                    **extent,
+                }
+            )
 
             logging.info("OK  map_id=%s  -> vector[%d]", map_id, vec.shape[0])
         except Exception as e:
@@ -438,18 +403,13 @@ def main():
             logging.error("FAIL map_id=%s: %s", map_id, e)
 
     if not ids:
-        logging.error("No GeoJSONs embedded. (processed=%d, failed=%d)", total, failed)
+        logging.error("No GeoJSONs embedded. failed=%d", failed)
         sys.exit(2)
 
-    # Stack to (M, D) and persist artifacts
-    try:
-        E = np.vstack(vecs).astype(np.float32, copy=False)
-    except Exception as e:
-        logging.error("Failed to stack embeddings: %s", e)
-        sys.exit(3)
-
-    save_outputs(outdir, rows, E, ids, feat_names or [], args.save_csv)
+    E = np.vstack(vecs).astype(np.float32, copy=False)
+    save_outputs(outdir, rows, E, ids, feat_names or [], bool(args.save_csv))
     logging.info("Saved %d vectors (failed=%d) to %s", len(ids), failed, outdir)
+
 
 if __name__ == "__main__":
     main()

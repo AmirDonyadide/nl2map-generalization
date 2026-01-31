@@ -1,4 +1,4 @@
-#src/train/save_bundle.py
+# src/train/save_bundle.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence, Tuple
 
 import joblib
+
+from src.constants import EXTENT_DIAG_COL, EXTENT_AREA_COL
 
 from .utils._bundle_utils import (
     build_cls_plus_regressors_bundle,
@@ -30,8 +32,8 @@ def save_cls_plus_regressors_bundle(
     cv_summary: Dict[str, Any],
     distance_ops: Sequence[str],
     area_ops: Sequence[str],
-    diag_col: str = "extent_diag_m",
-    area_col: str = "extent_area_m2",
+    diag_col: str = EXTENT_DIAG_COL,
+    area_col: str = EXTENT_AREA_COL,
     save_name: str | None = None,
 ) -> BundleSaveResult:
     out_dir = Path(out_dir)

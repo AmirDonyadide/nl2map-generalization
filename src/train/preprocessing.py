@@ -1,4 +1,4 @@
-#src/train/preprocessing.py
+# src/train/preprocessing.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,7 +8,15 @@ from typing import Optional, Tuple
 import joblib
 import numpy as np
 
-from src.types import FeatureMode
+from src.constants import (
+    L2_NORM_EPS,
+    MAP_CLIP_Q_DEFAULT,
+    MAP_IMPUTE_STRATEGY_DEFAULT,
+    MAP_ROBUST_QRANGE_DEFAULT,
+    MAP_VAR_EPS_DEFAULT,
+    FeatureMode,
+)
+
 from .utils._preprocessing_utils import (
     fit_map_preproc,
     l2_normalize_rows,
@@ -33,11 +41,11 @@ def fit_transform_modality_preproc(
     feature_mode: FeatureMode,
     map_dim: int,
     prompt_dim: int,
-    eps: float = 1e-12,
-    clip_q: Tuple[int, int] = (5, 95),
-    impute_strategy: str = "median",
-    robust_qrange: Tuple[int, int] = (5, 95),
-    var_eps: float = 1e-12,
+    eps: float = L2_NORM_EPS,
+    clip_q: Tuple[int, int] = MAP_CLIP_Q_DEFAULT,
+    impute_strategy: str = MAP_IMPUTE_STRATEGY_DEFAULT,
+    robust_qrange: Tuple[int, int] = MAP_ROBUST_QRANGE_DEFAULT,
+    var_eps: float = MAP_VAR_EPS_DEFAULT,
     save_path: Optional[Path] = None,
 ) -> PreprocResult:
     """
@@ -47,7 +55,7 @@ def fit_transform_modality_preproc(
       - prompt_plus_map:
           * split map/prompt
           * prompt: L2-normalize
-          * map: inf->nan, median impute, clip by train quantiles, drop near-zero variance, robust-scale
+          * map: inf->nan, impute, clip by train quantiles, drop near-zero variance, robust-scale
           * fuse back to [map | prompt]
 
     Saves a preprocessing bundle (if save_path provided).

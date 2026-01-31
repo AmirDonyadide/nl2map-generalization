@@ -1,4 +1,4 @@
-#src/train/run_map_embeddings.py
+# src/train/run_map_embeddings.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +6,15 @@ from pathlib import Path
 from typing import Dict
 
 from src.mapvec.maps import map_embeddings as me
+from src.constants import (
+    MAP_EMBED_VERBOSITY_DEFAULT,
+    MAP_EMBED_NORM_DEFAULT,
+    MAPS_ID_COL,
+    MAP_N_POLYGONS_COL,
+    MAP_EMBEDDINGS_NPZ_NAME,
+    MAPS_PARQUET_NAME,
+)
+
 from .utils._map_embeddings_utils import (
     allowed_tiles_from_excel,
     embed_maps_with_extents,
@@ -40,15 +49,15 @@ def run_map_embeddings_from_config(
     only_complete: bool,
     exclude_removed: bool,
     out_dir: Path,
-    verbosity: int = 1,
-    norm: str = "extent",
+    verbosity: int = MAP_EMBED_VERBOSITY_DEFAULT,
+    norm: str = MAP_EMBED_NORM_DEFAULT,
 ) -> MapEmbeddingRunMeta:
     maps_root = Path(maps_root)
     user_study_xlsx = Path(user_study_xlsx)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    me.setup_logging(verbosity=verbosity)
+    me.setup_logging(verbosity=int(verbosity))
 
     allowed_tile_ids = allowed_tiles_from_excel(
         user_study_xlsx=user_study_xlsx,
@@ -75,13 +84,13 @@ def run_map_embeddings_from_config(
     # second pass embed
     ids, E, rows, feat_names, stats = embed_maps_with_extents(
         pairs=pairs,
-        norm=norm,
-        max_polygons=max_polygons,
+        norm=str(norm),
+        max_polygons=int(max_polygons),
     )
 
     # Add polygon counts into rows (optional but useful)
     for r in rows:
-        r["n_polygons"] = int(counts.get(r["map_id"], 0))
+        r[MAP_N_POLYGONS_COL] = int(counts.get(str(r.get(MAPS_ID_COL)), 0))
 
     me.save_outputs(
         out_dir=out_dir,
@@ -92,8 +101,8 @@ def run_map_embeddings_from_config(
         save_csv=False,
     )
 
-    embeddings_path = out_dir / "maps_embeddings.npz"
-    maps_parquet_path = out_dir / "maps.parquet"
+    embeddings_path = out_dir / MAP_EMBEDDINGS_NPZ_NAME
+    maps_parquet_path = out_dir / MAPS_PARQUET_NAME
 
     return MapEmbeddingRunMeta(
         n_tiles_allowed=int(len(allowed_tile_ids)),

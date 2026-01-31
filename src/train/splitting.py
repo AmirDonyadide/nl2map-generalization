@@ -1,4 +1,4 @@
-# src/train/splitting.py 
+# src/train/splitting.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,6 +9,27 @@ import json
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedShuffleSplit
+
+from src.constants import (
+    OPERATOR_COL,
+    INTENSITY_COL,
+    MAPS_ID_COL,
+    FIXED_OPERATOR_CLASSES,
+    MAP_ID_WIDTH,
+    NA_TOKENS,
+    SPLIT_USE_INTENSITY_FOR_STRAT_DEFAULT,
+    SPLIT_SEED_DEFAULT,
+    SPLIT_VAL_RATIO_DEFAULT,
+    SPLIT_TEST_RATIO_DEFAULT,
+    SPLIT_MAX_ATTEMPTS_DEFAULT,
+    SPLIT_VERBOSE_DEFAULT,
+    SPLIT_TINY_SINGLE_MAP_THRESHOLD,
+    SPLIT_STRAT_COL_NAME,
+    SPLIT_STRAT_DELIM,
+    SPLIT_SSS2_SEED_OFFSET,
+    SPLIT_JSON_INDENT,
+    SPLIT_PROMPTS_PER_MAP_MULTI_THRESHOLD,
+)
 
 
 @dataclass(frozen=True)
@@ -27,41 +48,45 @@ class SplitResult:
 
 def _clean_string_col(s: pd.Series) -> pd.Series:
     s = s.astype("string").str.strip().str.lower()
-    s = s.mask(s.isin(["", "nan"]), pd.NA)
+    s = s.mask(s.isin(NA_TOKENS), pd.NA)
     return s
 
 
 def _normalize_map_id_col(s: pd.Series) -> pd.Series:
-    # robust zfill; keeps strings and handles numeric map ids,
+    # robust zfill; keeps strings and handles numeric map ids
     out = s.astype(str).str.strip()
-    out = out.mask(out.isin(["", "nan", "None"]), pd.NA)
-    # if numeric-looking -> zfill(4)
+    out = out.mask(out.isin(NA_TOKENS | {"None"}), pd.NA)
+
+    # if numeric-looking -> zfill(MAP_ID_WIDTH)
     m = out.notna() & out.str.fullmatch(r"\d+")
-    out.loc[m] = out.loc[m].str.zfill(4)
-    # if non-numeric, still zfill(4) is harmless if already "1304"
+    out.loc[m] = out.loc[m].str.zfill(int(MAP_ID_WIDTH))
+
+    # keep missingness
     out = out.fillna(pd.NA)
     return out
 
 
 def _has_all_ops(dfx: pd.DataFrame, op_col: str, fixed_classes: Sequence[str]) -> bool:
-    return set(dfx[op_col].dropna().unique()) >= set([str(x).strip().lower() for x in fixed_classes])
+    want = {str(x).strip().lower() for x in fixed_classes}
+    got = set(dfx[op_col].dropna().unique())
+    return got >= want
 
 
 def make_splits_multi_prompt_to_train(
     *,
     df: pd.DataFrame,
     X: np.ndarray,
-    op_col: str = "operator",
-    intensity_col: Optional[str] = "intensity",
-    map_id_col: str = "map_id",
-    fixed_classes: Sequence[str] = ("simplify", "select", "aggregate", "displace"),
-    use_intensity_for_strat: bool = True,
-    seed: int = 42,
-    val_ratio: float = 0.15,
-    test_ratio: float = 0.15,
-    max_attempts: int = 500,
+    op_col: str = OPERATOR_COL,
+    intensity_col: Optional[str] = INTENSITY_COL,
+    map_id_col: str = MAPS_ID_COL,
+    fixed_classes: Sequence[str] = FIXED_OPERATOR_CLASSES,
+    use_intensity_for_strat: bool = SPLIT_USE_INTENSITY_FOR_STRAT_DEFAULT,
+    seed: int = SPLIT_SEED_DEFAULT,
+    val_ratio: float = SPLIT_VAL_RATIO_DEFAULT,
+    test_ratio: float = SPLIT_TEST_RATIO_DEFAULT,
+    max_attempts: int = SPLIT_MAX_ATTEMPTS_DEFAULT,
     save_splits_json: Optional[Path] = None,
-    verbose: bool = True,
+    verbose: bool = SPLIT_VERBOSE_DEFAULT,
 ) -> SplitResult:
     """
     Create train/val/test splits with constraints:
@@ -80,7 +105,7 @@ def make_splits_multi_prompt_to_train(
     if op_col not in df.columns:
         raise KeyError(f"Missing '{op_col}' in df.")
 
-    # ✅ Normalize map_id defensively
+    # Normalize map_id defensively
     df[map_id_col] = _normalize_map_id_col(df[map_id_col])
 
     # clean operator + intensity columns
@@ -90,7 +115,7 @@ def make_splits_multi_prompt_to_train(
 
     # prompts per map
     prompt_counts = df.groupby(map_id_col).size()
-    multi_map_ids = prompt_counts[prompt_counts > 1].index.astype(str).tolist()
+    multi_map_ids = prompt_counts[prompt_counts > SPLIT_PROMPTS_PER_MAP_MULTI_THRESHOLD].index.astype(str).tolist()
     single_map_ids = prompt_counts[prompt_counts == 1].index.astype(str).tolist()
 
     if verbose:
@@ -111,7 +136,7 @@ def make_splits_multi_prompt_to_train(
     # FALLBACK: tiny datasets
     # ---------------------------
     n_single = len(map_level)
-    if n_single < 2:
+    if n_single < SPLIT_TINY_SINGLE_MAP_THRESHOLD:
         if verbose:
             print(
                 "\n⚠️ Fallback split activated: "
@@ -132,24 +157,25 @@ def make_splits_multi_prompt_to_train(
         if save_splits_json is not None:
             save_splits_json = Path(save_splits_json)
             save_splits_json.parent.mkdir(parents=True, exist_ok=True)
-            json.dump(
-                {
-                    "train_idx": train_idx.tolist(),
-                    "val_idx": [],
-                    "test_idx": [],
-                    "train_maps": sorted(list(train_maps)),
-                    "val_maps": [],
-                    "test_maps": [],
-                    "seed_used": int(seed),
-                    "use_intensity_for_strat_requested": bool(use_intensity_for_strat),
-                    "use_intensity_for_strat_final": False,
-                    "fixed_classes": [str(x) for x in fixed_classes],
-                    "ratios": {"val_ratio": float(val_ratio), "test_ratio": float(test_ratio)},
-                    "note": "fallback_all_train_due_to_tiny_dataset",
-                },
-                open(save_splits_json, "w"),
-                indent=2,
-            )
+            with open(save_splits_json, "w") as f:
+                json.dump(
+                    {
+                        "train_idx": train_idx.tolist(),
+                        "val_idx": [],
+                        "test_idx": [],
+                        "train_maps": sorted(list(train_maps)),
+                        "val_maps": [],
+                        "test_maps": [],
+                        "seed_used": int(seed),
+                        "use_intensity_for_strat_requested": bool(use_intensity_for_strat),
+                        "use_intensity_for_strat_final": False,
+                        "fixed_classes": [str(x) for x in fixed_classes],
+                        "ratios": {"val_ratio": float(val_ratio), "test_ratio": float(test_ratio)},
+                        "note": "fallback_all_train_due_to_tiny_dataset",
+                    },
+                    f,
+                    indent=int(SPLIT_JSON_INDENT),
+                )
             if verbose:
                 print("\n✅ Saved fallback split to", str(save_splits_json))
 
@@ -169,17 +195,20 @@ def make_splits_multi_prompt_to_train(
     # strat label
     use_int_strat_final = bool(use_intensity_for_strat and intensity_col and intensity_col in map_level.columns)
     if use_int_strat_final:
-        map_level["_strat"] = (
-            map_level[op_col].astype("string") + "__" + map_level[intensity_col].astype("string")
+        map_level[SPLIT_STRAT_COL_NAME] = (
+            map_level[op_col].astype("string") + SPLIT_STRAT_DELIM + map_level[intensity_col].astype("string")
         )
-        vc = map_level["_strat"].value_counts()
+        vc = map_level[SPLIT_STRAT_COL_NAME].value_counts()
         if (vc < 2).any():
             if verbose:
-                print("\n⚠️ Some operator×intensity groups too rare (<2 single-maps). Falling back to operator-only stratification.")
-            map_level["_strat"] = map_level[op_col]
+                print(
+                    "\n⚠️ Some operator×intensity groups too rare (<2 single-maps). "
+                    "Falling back to operator-only stratification."
+                )
+            map_level[SPLIT_STRAT_COL_NAME] = map_level[op_col]
             use_int_strat_final = False
     else:
-        map_level["_strat"] = map_level[op_col]
+        map_level[SPLIT_STRAT_COL_NAME] = map_level[op_col]
         use_int_strat_final = False
 
     # split ratios
@@ -191,17 +220,19 @@ def make_splits_multi_prompt_to_train(
     val_rel = val_ratio / (1.0 - test_ratio)
 
     X_idx = np.arange(len(map_level))
-    y_strat = map_level["_strat"].to_numpy()
+    y_strat = map_level[SPLIT_STRAT_COL_NAME].to_numpy()
     map_ids_arr = map_level[map_id_col].astype(str).to_numpy()
 
     best = None
-    for attempt in range(max_attempts):
+    for attempt in range(int(max_attempts)):
         rs = int(seed) + attempt
 
-        sss1 = StratifiedShuffleSplit(n_splits=1, test_size=test_ratio, random_state=rs)
+        sss1 = StratifiedShuffleSplit(n_splits=1, test_size=float(test_ratio), random_state=rs)
         trainval_i, test_i = next(sss1.split(X_idx, y_strat))
 
-        sss2 = StratifiedShuffleSplit(n_splits=1, test_size=val_rel, random_state=rs + 999)
+        sss2 = StratifiedShuffleSplit(
+            n_splits=1, test_size=float(val_rel), random_state=rs + int(SPLIT_SSS2_SEED_OFFSET)
+        )
         train_i, val_i = next(sss2.split(trainval_i, y_strat[trainval_i]))
 
         single_train_maps = set(map_ids_arr[trainval_i[train_i]])
@@ -219,9 +250,11 @@ def make_splits_multi_prompt_to_train(
         df_val_tmp = df[df[map_id_col].isin(val_maps)]
         df_test_tmp = df[df[map_id_col].isin(test_maps)]
 
-        if not (_has_all_ops(df_train_tmp, op_col, fixed_classes)
-                and _has_all_ops(df_val_tmp, op_col, fixed_classes)
-                and _has_all_ops(df_test_tmp, op_col, fixed_classes)):
+        if not (
+            _has_all_ops(df_train_tmp, op_col, fixed_classes)
+            and _has_all_ops(df_val_tmp, op_col, fixed_classes)
+            and _has_all_ops(df_test_tmp, op_col, fixed_classes)
+        ):
             continue
 
         best = (train_maps, val_maps, test_maps, rs)
@@ -244,23 +277,24 @@ def make_splits_multi_prompt_to_train(
     if save_splits_json is not None:
         save_splits_json = Path(save_splits_json)
         save_splits_json.parent.mkdir(parents=True, exist_ok=True)
-        json.dump(
-            {
-                "train_idx": train_idx.tolist(),
-                "val_idx": val_idx.tolist(),
-                "test_idx": test_idx.tolist(),
-                "train_maps": sorted([str(x) for x in train_maps]),
-                "val_maps": sorted([str(x) for x in val_maps]),
-                "test_maps": sorted([str(x) for x in test_maps]),
-                "seed_used": int(used_seed),
-                "use_intensity_for_strat_requested": bool(use_intensity_for_strat),
-                "use_intensity_for_strat_final": bool(use_int_strat_final),
-                "fixed_classes": [str(x) for x in fixed_classes],
-                "ratios": {"val_ratio": float(val_ratio), "test_ratio": float(test_ratio)},
-            },
-            open(save_splits_json, "w"),
-            indent=2,
-        )
+        with open(save_splits_json, "w") as f:
+            json.dump(
+                {
+                    "train_idx": train_idx.tolist(),
+                    "val_idx": val_idx.tolist(),
+                    "test_idx": test_idx.tolist(),
+                    "train_maps": sorted([str(x) for x in train_maps]),
+                    "val_maps": sorted([str(x) for x in val_maps]),
+                    "test_maps": sorted([str(x) for x in test_maps]),
+                    "seed_used": int(used_seed),
+                    "use_intensity_for_strat_requested": bool(use_intensity_for_strat),
+                    "use_intensity_for_strat_final": bool(use_int_strat_final),
+                    "fixed_classes": [str(x) for x in fixed_classes],
+                    "ratios": {"val_ratio": float(val_ratio), "test_ratio": float(test_ratio)},
+                },
+                f,
+                indent=int(SPLIT_JSON_INDENT),
+            )
         if verbose:
             print("\n✅ Saved splits to", str(save_splits_json))
 

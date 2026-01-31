@@ -8,9 +8,7 @@ from sklearn.metrics import f1_score
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.neural_network import MLPClassifier
 
-
-HIDDEN_LAYER_CANDIDATES = [(64,), (128,), (256,), (128, 64), (256, 128), (256, 128, 64)]
-BATCH_CANDIDATES = [16, 32, 64, 128]
+from src.constants import HIDDEN_LAYER_CANDIDATES, BATCH_CANDIDATES
 
 
 def fit_maybe_weighted(clf: Any, X: np.ndarray, y: np.ndarray, sample_w: np.ndarray) -> bool:

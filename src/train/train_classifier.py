@@ -1,4 +1,4 @@
-#src/train/train_classifier.py
+# src/train/train_classifier.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,7 +11,21 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.neural_network import MLPClassifier
 
-from .utils._classifier_utils import (candidate_sort_key, cv_macro_f1, draw_mlp_params, fit_maybe_weighted)
+from src.constants import (
+    CLS_SEARCH_N_ITER_DEFAULT,
+    CLS_SEARCH_N_SPLITS_DEFAULT,
+    CLS_SEARCH_SEED_DEFAULT,
+    CLS_SEARCH_VERBOSE_DEFAULT,
+    CLS_MODEL_NAME_TEMPLATE,
+    CLS_SEARCH_TOPK,
+)
+
+from .utils._classifier_utils import (
+    candidate_sort_key,
+    cv_macro_f1,
+    draw_mlp_params,
+    fit_maybe_weighted,
+)
 
 
 @dataclass(frozen=True)
@@ -38,10 +52,10 @@ def train_mlp_classifier_with_search(
     y_test: np.ndarray,
     class_names: Sequence[str],
     out_dir: Path,
-    n_iter: int = 50,
-    n_splits: int = 5,
-    seed: int = 42,
-    verbose: bool = True,
+    n_iter: int = CLS_SEARCH_N_ITER_DEFAULT,
+    n_splits: int = CLS_SEARCH_N_SPLITS_DEFAULT,
+    seed: int = CLS_SEARCH_SEED_DEFAULT,
+    verbose: bool = CLS_SEARCH_VERBOSE_DEFAULT,
     save_name: str | None = None,
 ) -> ClassifierTrainResult:
     """
@@ -85,9 +99,9 @@ def train_mlp_classifier_with_search(
     if n_groups < n_splits:
         raise ValueError(f"Not enough groups for StratifiedGroupKFold: groups={n_groups}, n_splits={n_splits}.")
 
-    cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    rng = np.random.RandomState(seed)
-    params_list = draw_mlp_params(rng, n_iter, random_state=seed)
+    cv = StratifiedGroupKFold(n_splits=int(n_splits), shuffle=True, random_state=int(seed))
+    rng = np.random.RandomState(int(seed))
+    params_list = draw_mlp_params(rng, int(n_iter), random_state=int(seed))
 
     candidates: List[Dict[str, Any]] = []
     if verbose:
@@ -105,7 +119,9 @@ def train_mlp_classifier_with_search(
         val_f1 = float(f1_score(y_val, val_pred, average="macro"))
         val_acc = float(accuracy_score(y_val, val_pred))
 
-        candidates.append({"params": params, "cv_mean": cv_mean, "cv_std": cv_std, "val_f1": val_f1, "val_acc": val_acc})
+        candidates.append(
+            {"params": params, "cv_mean": cv_mean, "cv_std": cv_std, "val_f1": val_f1, "val_acc": val_acc}
+        )
 
         if verbose:
             print(
@@ -121,8 +137,8 @@ def train_mlp_classifier_with_search(
 
     if verbose:
         print("\n🏆 Selected params:", best_params)
-        print("\n=== Top 5 candidates ===")
-        for c in candidates[:5]:
+        print(f"\n=== Top {int(CLS_SEARCH_TOPK)} candidates ===")
+        for c in candidates[: int(CLS_SEARCH_TOPK)]:
             print(
                 f"VAL F1={c['val_f1']:.3f} acc={c['val_acc']:.3f} | "
                 f"cvF1={c['cv_mean']:.3f}±{c['cv_std']:.3f}"
@@ -148,7 +164,7 @@ def train_mlp_classifier_with_search(
             print(classification_report(ys, yhat, labels=np.arange(n_classes), target_names=cn, zero_division=0))
             print("Confusion matrix:\n", confusion_matrix(ys, yhat))
 
-    model_name = save_name or f"clf_{exp_name}.joblib"
+    model_name = save_name or CLS_MODEL_NAME_TEMPLATE.format(exp_name=str(exp_name))
     model_path = out_dir / model_name
 
     joblib.dump(
@@ -156,7 +172,7 @@ def train_mlp_classifier_with_search(
             "model": final_clf,
             "class_names": cn,
             "best_params": best_params,
-            "search_top5": candidates[:5],
+            "search_topk": candidates[: int(CLS_SEARCH_TOPK)],
             "metrics": {
                 "val_acc": val_acc,
                 "val_f1_macro": val_f1m,

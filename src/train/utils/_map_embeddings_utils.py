@@ -1,4 +1,4 @@
-#src/train/utils/_map_embeddings_utils.py
+# src/train/utils/_map_embeddings_utils.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,10 +9,17 @@ import numpy as np
 import pandas as pd
 
 from src.mapvec.maps import map_embeddings as me
+from src.constants import (
+    MAP_ID_WIDTH,
+    MAPS_ID_COL,
+    MAP_GEOJSON_COL,
+    EXTENT_DIAG_COL,
+    EXTENT_AREA_COL,
+)
 
 
-def normalize_tile_id(x: Any, width: int = 4) -> str:
-    return str(x).strip().zfill(width)
+def normalize_tile_id(x: Any, width: int = MAP_ID_WIDTH) -> str:
+    return str(x).strip().zfill(int(width))
 
 
 def allowed_tiles_from_excel(
@@ -24,7 +31,7 @@ def allowed_tiles_from_excel(
     remove_col: str,
     only_complete: bool,
     exclude_removed: bool,
-    width: int = 4,
+    width: int = MAP_ID_WIDTH,
 ) -> set[str]:
     dfu = pd.read_excel(user_study_xlsx, sheet_name=responses_sheet)
 
@@ -48,8 +55,9 @@ def allowed_tiles_from_excel(
     tile_num = pd.to_numeric(tile_raw, errors="coerce")
 
     if tile_num.notna().all():
-        return set(tile_num.astype(int).astype(str).str.zfill(width).tolist())
-    return set(tile_raw.astype(str).str.strip().str.zfill(width).tolist())
+        return set(tile_num.astype(int).astype(str).str.zfill(int(width)).tolist())
+
+    return set(tile_raw.astype(str).str.strip().str.zfill(int(width)).tolist())
 
 
 def safe_count_valid_polygons(path: Path) -> int:
@@ -106,8 +114,8 @@ def embed_maps_with_extents(
             continue
 
         extent = me.compute_extent_refs(path)
-        diag = float(extent.get("extent_diag_m", np.nan))
-        area = float(extent.get("extent_area_m2", np.nan))
+        diag = float(extent.get(EXTENT_DIAG_COL, np.nan))
+        area = float(extent.get(EXTENT_AREA_COL, np.nan))
 
         if not (np.isfinite(diag) and diag > 0 and np.isfinite(area) and area > 0):
             n_skipped_bad_extent += 1
@@ -115,7 +123,7 @@ def embed_maps_with_extents(
 
         ids.append(map_id_str)
         vecs.append(vec)
-        rows.append({"map_id": map_id_str, "geojson": str(path), **extent})
+        rows.append({MAPS_ID_COL: map_id_str, MAP_GEOJSON_COL: str(path), **extent})
 
     if not vecs:
         raise RuntimeError("No valid map embeddings produced (all filtered out).")

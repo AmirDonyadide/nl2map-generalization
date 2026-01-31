@@ -1,4 +1,3 @@
-#src/train/labels_and_weights.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +5,14 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 import pandas as pd
+
+from src.constants import (
+    OPERATOR_COL,
+    MAPS_ID_COL,
+    FIXED_OPERATOR_CLASSES,
+    USE_MAP_WEIGHT_DEFAULT,
+    CLASS_WEIGHT_MODE_DEFAULT,
+)
 
 from .utils._labels_and_weights_utils import (
     compute_class_weights_from_train,
@@ -30,11 +37,11 @@ def build_labels_and_sample_weights(
     df_train: pd.DataFrame,
     df_val: pd.DataFrame,
     df_test: pd.DataFrame,
-    op_col: str = "operator",
-    map_id_col: str = "map_id",
-    fixed_classes: Sequence[str] = ("simplify", "select", "aggregate", "displace"),
-    use_map_weight: bool = True,
-    class_weight_mode: str = "balanced",
+    op_col: str = OPERATOR_COL,
+    map_id_col: str = MAPS_ID_COL,
+    fixed_classes: Sequence[str] = FIXED_OPERATOR_CLASSES,
+    use_map_weight: bool = USE_MAP_WEIGHT_DEFAULT,
+    class_weight_mode: str = CLASS_WEIGHT_MODE_DEFAULT,
 ) -> LabelsAndWeights:
     """
     Build fixed-order class labels for train/val/test and (optionally) sample weights.
@@ -43,12 +50,6 @@ def build_labels_and_sample_weights(
       (A) class imbalance correction (sklearn compute_class_weight)
       (B) map-level prompt multiplicity correction:
           each map contributes ~1 total weight by scaling each sample by 1/count(map_id)
-
-    Returns:
-      - class_names
-      - y_train, y_val, y_test (int codes)
-      - sample_w (float64, length len(df_train))
-      - class_weight_map
     """
     class_names = normalize_fixed_classes(fixed_classes)
 
@@ -57,7 +58,9 @@ def build_labels_and_sample_weights(
     y_test = encode_labels(df_test, op_col=op_col, class_names=class_names, split_name="TEST")
 
     cls_w, class_weight_map = compute_class_weights_from_train(
-        y_train, class_names=class_names, class_weight_mode=class_weight_mode
+        y_train,
+        class_names=class_names,
+        class_weight_mode=class_weight_mode,
     )
 
     w_class = cls_w[y_train].astype(np.float64)

@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from sklearn.utils.class_weight import compute_class_weight
 
+from src.constants import CLASS_WEIGHT_MODE_DEFAULT
+
 
 def normalize_str_series(s: pd.Series) -> pd.Series:
     """Lowercase+strip string labels; keeps NaNs as NaN."""
@@ -48,7 +50,7 @@ def compute_class_weights_from_train(
     y_train: np.ndarray,
     *,
     class_names: Sequence[str],
-    class_weight_mode: str,
+    class_weight_mode: str = CLASS_WEIGHT_MODE_DEFAULT,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     if y_train.size == 0:
         raise ValueError("TRAIN split is empty; cannot compute class weights.")

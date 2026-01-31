@@ -1,12 +1,21 @@
-#src/train/run_concat_features.py
+# src/train/run_concat_features.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from src.types import FeatureMode
 from src.mapvec.concat import concat_embeddings as ce
+from src.constants import (
+    CONCAT_VERBOSITY_DEFAULT,
+    PROMPT_ID_WIDTH_DEFAULT,
+    PROMPT_EMBEDDINGS_NPZ_NAME,
+    PROMPTS_PARQUET_NAME,
+    MAP_EMBEDDINGS_NPZ_NAME,
+    MAPS_PARQUET_NAME,
+    EXTENT_COLS_PREFERRED,
+    FeatureMode,
+)
 
 from .utils._concat_features_utils import (
     build_pairs_from_prompts,
@@ -42,24 +51,24 @@ def run_concat_features_from_dirs(
     out_dir: Path,
     exp_name: str,
     feature_mode: FeatureMode,
-    verbosity: int = 1,
+    verbosity: int = CONCAT_VERBOSITY_DEFAULT,
     save_pairs_name: Optional[str] = None,
     save_X_name: Optional[str] = None,
     save_meta_name: Optional[str] = None,
-    prompt_id_width: int = 4,
+    prompt_id_width: int = PROMPT_ID_WIDTH_DEFAULT,
     pairs_parquet: Optional[Path] = None,
 ) -> ConcatRunMeta:
     prompt_out_dir = Path(prompt_out_dir)
     map_out_dir = Path(map_out_dir)
     out_dir = Path(out_dir)
 
-    ce.setup_logging(verbosity=verbosity)
+    ce.setup_logging(verbosity=int(verbosity))
 
-    prm_npz_path = prompt_out_dir / "prompts_embeddings.npz"
-    prompts_pq = Path(pairs_parquet) if pairs_parquet is not None else (prompt_out_dir / "prompts.parquet")
+    prm_npz_path = prompt_out_dir / PROMPT_EMBEDDINGS_NPZ_NAME
+    prompts_pq = Path(pairs_parquet) if pairs_parquet is not None else (prompt_out_dir / PROMPTS_PARQUET_NAME)
 
-    map_npz_path = map_out_dir / "maps_embeddings.npz"
-    maps_pq = map_out_dir / "maps.parquet"
+    map_npz_path = map_out_dir / MAP_EMBEDDINGS_NPZ_NAME
+    maps_pq = map_out_dir / MAPS_PARQUET_NAME
 
     required = [prompts_pq, map_npz_path, maps_pq]
     if uses_prompt(feature_mode):
@@ -69,21 +78,12 @@ def run_concat_features_from_dirs(
         if not p.exists():
             raise FileNotFoundError(f"Missing required input: {p}")
 
-    pairs = build_pairs_from_prompts(prompts_pq, prompt_id_width=prompt_id_width)
+    pairs = build_pairs_from_prompts(prompts_pq, prompt_id_width=int(prompt_id_width))
 
-    extent_cols_preferred = [
-        "map_id",
-        "extent_diag_m",
-        "extent_area_m2",
-        "extent_width_m",
-        "extent_height_m",
-        "extent_minx",
-        "extent_miny",
-        "extent_maxx",
-        "extent_maxy",
-    ]
-    pairs, extent_cols_saved, n_dropped_missing_extent = merge_extents_from_maps(
-        pairs, maps_pq, extent_cols_preferred=extent_cols_preferred
+    pairs, extent_cols_saved, _n_dropped_missing_extent = merge_extents_from_maps(
+        pairs,
+        maps_pq,
+        extent_cols_preferred=EXTENT_COLS_PREFERRED,
     )
 
     E_map, map_ids = load_npz_E_and_ids(map_npz_path)
@@ -98,7 +98,7 @@ def run_concat_features_from_dirs(
         feature_mode=feature_mode,
         map_ids=map_ids,
         prm_ids=prm_ids,
-        prompt_id_width=prompt_id_width,
+        prompt_id_width=int(prompt_id_width),
     )
     if not im_list:
         raise RuntimeError("No valid pairs after ID matching.")
@@ -134,7 +134,7 @@ def run_concat_features_from_dirs(
         missing_ids=missing_ids,
         extent_cols_saved=extent_cols_saved,
         sources=sources,
-        prompt_id_width=prompt_id_width,
+        prompt_id_width=int(prompt_id_width),
         save_pairs_name=save_pairs_name,
         save_X_name=save_X_name,
         save_meta_name=save_meta_name,

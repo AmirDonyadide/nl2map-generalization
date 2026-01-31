@@ -4,6 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence, Tuple
 
+from src.constants import (
+    BUNDLE_VERSION,
+    PARAM_TARGET_NAME,
+    NORMALIZATION_TYPE,
+)
 
 def validate_regressors_bundle_inputs(
     *,
@@ -29,7 +34,6 @@ def validate_regressors_bundle_inputs(
     if overlap:
         raise ValueError(f"distance_ops and area_ops overlap: {overlap}")
 
-
 def build_cls_plus_regressors_bundle(
     *,
     classifier: Any,
@@ -43,14 +47,14 @@ def build_cls_plus_regressors_bundle(
     area_col: str,
 ) -> Dict[str, Any]:
     return {
-        "bundle_version": 1,
+        "bundle_version": BUNDLE_VERSION,
         "classifier": classifier,
         "regressors_by_class": dict(regressors_by_class),
         "class_names": [str(x) for x in class_names],
         "use_log1p": bool(use_log1p),
-        "target": "param_norm",
+        "target": PARAM_TARGET_NAME,
         "normalization": {
-            "type": "dynamic_extent",
+            "type": NORMALIZATION_TYPE,
             "distance_ops": list(distance_ops),
             "area_ops": list(area_ops),
             "distance_ref_col": str(diag_col),
@@ -58,7 +62,6 @@ def build_cls_plus_regressors_bundle(
         },
         "cv_summary": cv_summary,
     }
-
 
 def resolve_bundle_path(out_dir: Path, *, exp_name: str, save_name: str | None) -> Path:
     fname = save_name or f"{exp_name}__cls_plus_regressors.joblib"

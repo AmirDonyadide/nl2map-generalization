@@ -1,4 +1,4 @@
-#src/mapvec/features/polygon_features.py
+# src/mapvec/features/polygon_features.py
 """
 polygon_features.py
 Hand-crafted polygon feature extraction (vector embeddings) using Shapely + Pandas.
@@ -24,63 +24,47 @@ from shapely.strtree import STRtree
 from shapely.errors import TopologicalError
 from shapely.prepared import prep
 
+from src.constants import (
+    # output schema
+    POLY_FEATURE_ID_COL,
+    POLY_FEATURE_ORDER,
+    POLY_BY_DIAG_FEATURES,
+    # normalization modes / defaults
+    POLY_NORM_MODE_DEFAULT,
+    POLY_NORM_FIXED_WH_DEFAULT,
+    # numeric stability / eps
+    EPS_POSITIVE,
+    POLY_ECC_EPS,
+    POLY_ECC_MAX,
+    # density radii (fractions of map diagonal)
+    POLY_DENSITY_R05_FRAC,
+    POLY_DENSITY_R10_FRAC,
+    # clipping / cleanup policy
+    POLY_CLIP_QHI,
+    # warnings policy
+    SHAPELY_WARN_MODULE_PREDICATES,
+    SHAPELY_WARN_MODULE_SETOPS,
+)
+
 GeometryLike = Union[Polygon, MultiPolygon]
 
-# Stable feature order for output columns (id is added separately)
-_NUMERIC_ORDER = [
-    "area",
-    "perimeter",
-    "centroid_x",
-    "centroid_y",
-    "circularity",
-    "axis_ratio",
-    "convexity",
-    "rectangularity",
-    "neighbor_count",
-    "bbox_width",
-    "bbox_height",
-    "orient_sin",
-    "orient_cos",
-    "eq_diameter",
-    "eccentricity",
-    "has_hole",
-    "reflex_ratio",
-    "nn_dist_median",  
-    "knn1",            
-    "knn3",            
-    "density_r05",
-    "density_r10",
-    "extent_fill",
-]
 
-
-_BY_DIAG = [
-    "perimeter", "eq_diameter",
-    "nn_dist_median",
-    "knn1", "knn3",
-    "bbox_width", "bbox_height",
-]
-
+# ---------- normalization helper ----------
 def _stabilize_polygon_feats(feats: dict, bbox) -> dict:
     minx, miny, maxx, maxy = bbox
-    bw = max(maxx - minx, 1e-12)
-    bh = max(maxy - miny, 1e-12)
+    bw = max(maxx - minx, float(EPS_POSITIVE))
+    bh = max(maxy - miny, float(EPS_POSITIVE))
     bbox_area = bw * bh
     diag = (bw * bw + bh * bh) ** 0.5
 
     # divide lengths/distances by diag
-    for k in _BY_DIAG:
+    for k in POLY_BY_DIAG_FEATURES:
         if k in feats and np.isfinite(feats[k]):
             feats[k] = float(feats[k]) / diag
 
     # divide area by bbox area
     if "area" in feats and np.isfinite(feats["area"]):
         feats["area"] = float(feats["area"]) / bbox_area
-
-    # map orientation components from [-1,1] to [0,1]
-    #for k in ("orient_sin", "orient_cos"):
-    #    if k in feats and np.isfinite(feats[k]):
-    #        feats[k] = 0.5 * (feats[k] + 1.0)
 
     return feats
 
@@ -89,24 +73,23 @@ def _stabilize_polygon_feats(feats: dict, bbox) -> dict:
 @contextmanager
 def _suppress_shapely_runtime_warnings():
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"shapely\.predicates")
-        warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"shapely\.set_operations")
+        warnings.filterwarnings("ignore", category=RuntimeWarning, module=SHAPELY_WARN_MODULE_PREDICATES)
+        warnings.filterwarnings("ignore", category=RuntimeWarning, module=SHAPELY_WARN_MODULE_SETOPS)
         yield
 
 
 def _finite_coords(g: BaseGeometry) -> bool:
     if g.is_empty:
         return False
-    # exterior
-    xs, ys = zip(*g.exterior.coords) #type: ignore
+    xs, ys = zip(*g.exterior.coords)  # type: ignore
     if not (np.isfinite(xs).all() and np.isfinite(ys).all()):
         return False
-    # holes
-    for r in g.interiors: #type: ignore
+    for r in g.interiors:  # type: ignore
         xs, ys = zip(*r.coords)
         if not (np.isfinite(xs).all() and np.isfinite(ys).all()):
             return False
     return True
+
 
 def _fix_and_filter(geoms: Iterable[GeometryLike]) -> List[BaseGeometry]:
     """
@@ -126,10 +109,11 @@ def _fix_and_filter(geoms: Iterable[GeometryLike]) -> List[BaseGeometry]:
         fixed.append(gg)
     return fixed
 
+
 def _min_rotated_rect_axes(poly: Polygon) -> Tuple[float, float]:
     """Return the two side lengths (a >= b) of the polygon's minimum rotated rectangle."""
     mrr = poly.minimum_rotated_rectangle
-    coords = list(mrr.exterior.coords) #type: ignore
+    coords = list(mrr.exterior.coords)  # type: ignore
     edges = []
     for i in range(len(coords) - 1):
         x1, y1 = coords[i]
@@ -145,10 +129,14 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
     """Compute compact features for a single Polygon. Centroid can be bbox-normalized."""
     if poly is None or poly.is_empty or not poly.is_valid:
         return {
-            "area": 0.0, "perimeter": 0.0,
-            "centroid_x": 0.0, "centroid_y": 0.0,
-            "circularity": 0.0, "axis_ratio": 0.0,
-            "convexity": 0.0, "rectangularity": 0.0,
+            "area": 0.0,
+            "perimeter": 0.0,
+            "centroid_x": 0.0,
+            "centroid_y": 0.0,
+            "circularity": 0.0,
+            "axis_ratio": 0.0,
+            "convexity": 0.0,
+            "rectangularity": 0.0,
         }
 
     area = poly.area
@@ -158,39 +146,36 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
     cx, cy = poly.centroid.x, poly.centroid.y
     if bbox is not None:
         minx, miny, maxx, maxy = bbox
-        w = max(maxx - minx, 1e-12)
-        h = max(maxy - miny, 1e-12)
+        w = max(maxx - minx, float(EPS_POSITIVE))
+        h = max(maxy - miny, float(EPS_POSITIVE))
         cx_n = (cx - minx) / w
         cy_n = (cy - miny) / h
     else:
         cx_n, cy_n = cx, cy
 
-    # shape descriptors
     circularity = (4 * math.pi * area) / (perimeter ** 2) if perimeter > 0 else 0.0
 
-    a, b = _min_rotated_rect_axes(poly)        # from min rotated rectangle
+    a, b = _min_rotated_rect_axes(poly)
     axis_ratio = float(min(1.0, max(0.0, (b / a) if a > 0 else 0.0)))
 
     hull = poly.convex_hull
     convexity = (area / hull.area) if hull.area > 0 else 0.0
 
-    mrr = poly.minimum_rotated_rectangle       # cache once
+    mrr = poly.minimum_rotated_rectangle
     rectangularity = (area / mrr.area) if mrr.area > 0 else 0.0
 
-    # bbox width/height (no need for min/max vars)
-    bw = max(poly.bounds[2] - poly.bounds[0], 1e-12)
-    bh = max(poly.bounds[3] - poly.bounds[1], 1e-12)
-
+    bw = max(poly.bounds[2] - poly.bounds[0], float(EPS_POSITIVE))
+    bh = max(poly.bounds[3] - poly.bounds[1], float(EPS_POSITIVE))
     extent_fill = min(1.0, float(area / (bw * bh)))
-    
+
     # orientation from the long edge of the MRR
-    mrr_coords = list(mrr.exterior.coords)     # type: ignore
+    mrr_coords = list(mrr.exterior.coords)  # type: ignore
     best_len, best_ang = 0.0, 0.0
     for k in range(len(mrr_coords) - 1):
         x1, y1 = mrr_coords[k]
         x2, y2 = mrr_coords[k + 1]
         dx, dy = (x2 - x1), (y2 - y1)
-        L = (dx*dx + dy*dy) ** 0.5
+        L = (dx * dx + dy * dy) ** 0.5
         if L > best_len:
             best_len = L
             best_ang = math.degrees(math.atan2(dy, dx)) % 180.0
@@ -199,30 +184,36 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
     # moments / eccentricity
     xs, ys = zip(*list(poly.exterior.coords))
     mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
-    dxs = [x - mx for x in xs]; dys = [y - my for y in ys]
-    cxx = sum(v*v for v in dxs) / max(len(xs)-1, 1)
-    cyy = sum(v*v for v in dys) / max(len(xs)-1, 1)
-    cxy = sum(a*b for a, b in zip(dxs, dys)) / max(len(xs)-1, 1)
+    dxs = [x - mx for x in xs]
+    dys = [y - my for y in ys]
+    cxx = sum(v * v for v in dxs) / max(len(xs) - 1, 1)
+    cyy = sum(v * v for v in dys) / max(len(xs) - 1, 1)
+    cxy = sum(a0 * b0 for a0, b0 in zip(dxs, dys)) / max(len(xs) - 1, 1)
     vals = np.linalg.eigvalsh(np.array([[cxx, cxy], [cxy, cyy]], dtype=float))
     lam2, lam1 = float(vals[0]), float(vals[1])
 
     if lam1 <= 0 or lam2 <= 0:
-        eccentricity = 0.0 if lam1 <= 0 else 0.999999
+        eccentricity = 0.0 if lam1 <= 0 else float(POLY_ECC_MAX)
     else:
         r = math.sqrt(lam1 / lam2)
-        eccentricity = 0.0 if r < 1.0 + 1e-12 else min(math.sqrt(max(0.0, 1.0 - 1.0/(r*r))), 0.999999)
+        eccentricity = (
+            0.0
+            if r < 1.0 + float(POLY_ECC_EPS)
+            else min(math.sqrt(max(0.0, 1.0 - 1.0 / (r * r))), float(POLY_ECC_MAX))
+        )
 
-    # holes
     has_hole = 1.0 if len(poly.interiors) > 0 else 0.0
 
-    # reflex ratio (exterior only) — angle values not needed
+    # reflex ratio (exterior only)
     ext = list(poly.exterior.coords)[:-1]
     reflex = 0
     n_vertices = len(ext)
     if n_vertices >= 3:
         for k in range(n_vertices):
-            a0 = ext[(k - 1) % n_vertices]; b0 = ext[k]; c0 = ext[(k + 1) % n_vertices]
-            cross = (b0[0]-a0[0])*(c0[1]-b0[1]) - (b0[1]-a0[1])*(c0[0]-b0[0])
+            a0 = ext[(k - 1) % n_vertices]
+            b0 = ext[k]
+            c0 = ext[(k + 1) % n_vertices]
+            cross = (b0[0] - a0[0]) * (c0[1] - b0[1]) - (b0[1] - a0[1]) * (c0[0] - b0[0])
             if cross < 0:
                 reflex += 1
     reflex_ratio = reflex / max(n_vertices, 1)
@@ -238,8 +229,8 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         "rectangularity": rectangularity,
         "bbox_width": bw,
         "bbox_height": bh,
-        "orient_sin": math.sin(2*theta),
-        "orient_cos": math.cos(2*theta),
+        "orient_sin": math.sin(2 * theta),
+        "orient_cos": math.cos(2 * theta),
         "eq_diameter": (2.0 * (area / math.pi) ** 0.5) if area > 0 else 0.0,
         "eccentricity": eccentricity,
         "has_hole": has_hole,
@@ -247,82 +238,70 @@ def _polygon_features_single(poly: Polygon, bbox=None) -> dict:
         "extent_fill": extent_fill,
     }
 
+
 def embed_polygons_handcrafted(
     geoms: Iterable[GeometryLike],
-    norm_mode: str = "extent",                      # "extent" | "fixed"
-    fixed_wh: tuple[float, float] | None = None,    # (width, height) when norm_mode="fixed"
+    norm_mode: str = POLY_NORM_MODE_DEFAULT,                     # "extent" | "fixed"
+    fixed_wh: tuple[float, float] | None = None,                 # overrides POLY_NORM_FIXED_WH_DEFAULT
 ) -> pd.DataFrame:
-    # 1) Clean/validate
     normalized: List[BaseGeometry] = _fix_and_filter(geoms)
     if not normalized:
-        return pd.DataFrame(columns=["id"] + _NUMERIC_ORDER)
+        return pd.DataFrame(columns=[POLY_FEATURE_ID_COL] + list(POLY_FEATURE_ORDER))
 
-    # 2) Real polygon extent (always computed once)
+    # extent (computed once)
     minx = min(g.bounds[0] for g in normalized)
     miny = min(g.bounds[1] for g in normalized)
     maxx = max(g.bounds[2] for g in normalized)
     maxy = max(g.bounds[3] for g in normalized)
     bbox_extent = (minx, miny, maxx, maxy)
 
-    # Decide the normalization scales (ONE mode drives both diag/area AND centroid normalization)
     if norm_mode == "fixed":
-        # desired fixed frame (defaults to 400x400 if not given)
-        W_desired, H_desired = (fixed_wh if fixed_wh is not None else (400.0, 400.0))
-        W_desired = float(W_desired); H_desired = float(H_desired)
+        W_desired, H_desired = fixed_wh if fixed_wh is not None else POLY_NORM_FIXED_WH_DEFAULT
+        W_desired = float(W_desired)
+        H_desired = float(H_desired)
 
-        # current polygon extent
         ext_w = maxx - minx
         ext_h = maxy - miny
 
-        # how much we are short of the desired size
         pad_w_total = max(0.0, W_desired - ext_w)
         pad_h_total = max(0.0, H_desired - ext_h)
 
-        # split padding evenly on both sides
-        pad_left   = pad_w_total * 0.5
-        pad_right  = pad_w_total * 0.5
+        pad_left = pad_w_total * 0.5
         pad_bottom = pad_h_total * 0.5
-        pad_top    = pad_h_total * 0.5
 
-        # anchor the centroid frame at the padded origin and make it exactly W_desired x H_desired
         origin_x = minx - pad_left
         origin_y = miny - pad_bottom
 
-        # scale used for diag/area + density radii is the fixed size
-        scale_bbox    = (0.0, 0.0, W_desired, H_desired)
-
-        # centroid_x/centroid_y are normalized to the padded fixed frame
+        scale_bbox = (0.0, 0.0, W_desired, H_desired)
         centroid_bbox = (origin_x, origin_y, origin_x + W_desired, origin_y + H_desired)
-
     else:
-        # extent mode (original behavior)
-        scale_bbox    = bbox_extent
+        scale_bbox = bbox_extent
         centroid_bbox = bbox_extent
 
-
     centroids = [g.centroid for g in normalized]
-    
-    # Precompute map-scale distances once
+
     dx = (scale_bbox[2] - scale_bbox[0])
     dy = (scale_bbox[3] - scale_bbox[1])
-    _map_diag = math.hypot(dx, dy)
-    _r05 = 0.05 * _map_diag
-    _r10 = 0.10 * _map_diag
+    map_diag = math.hypot(dx, dy)
 
-    # 3) Indexes …
+    r05 = float(POLY_DENSITY_R05_FRAC) * map_diag
+    r10 = float(POLY_DENSITY_R10_FRAC) * map_diag
+
     tree = STRtree(normalized)
     prepared = [prep(g) if (not g.is_empty and g.is_valid) else None for g in normalized]
-    id_map  = {id(g): k for k, g in enumerate(normalized)}
+    id_map = {id(g): k for k, g in enumerate(normalized)}
     wkb_map = {g.wkb: k for k, g in enumerate(normalized)}
 
     rows = []
     for i, geom in enumerate(normalized):
-        base = (max(geom.geoms, key=lambda p: p.area).buffer(0) if isinstance(geom, MultiPolygon) else geom.buffer(0))
+        base = (
+            max(geom.geoms, key=lambda p: p.area).buffer(0)
+            if isinstance(geom, MultiPolygon)
+            else geom.buffer(0)
+        )
 
-        # 👉 centroids normalized by the SAME mode (extent or fixed width/height)
         feats = _polygon_features_single(base, bbox=centroid_bbox)
 
-        # neighbors …
         touch_candidates = list(tree.query(geom)) if (not geom.is_empty and geom.is_valid) else []
         inter_candidates = touch_candidates
         prep_geom = prepared[i] if (not geom.is_empty and geom.is_valid) else None
@@ -346,7 +325,6 @@ def embed_polygons_handcrafted(
                 return False
 
         def _to_indices(cands, pred: str) -> List[int]:
-            # normalize to list to avoid NumPy truthiness errors
             if cands is None:
                 return []
             cands = list(cands)
@@ -354,24 +332,26 @@ def embed_polygons_handcrafted(
                 return []
 
             idxs: List[int] = []
+
             def _accept(j: int) -> bool:
                 gj = normalized[j]
-                if gj.is_empty or not gj.is_valid: 
+                if gj.is_empty or not gj.is_valid:
                     return False
-                if pred == "touches": 
+                if pred == "touches":
                     return _safe_touches(geom, gj)
-                if pred in ("overlap","intersects"):
+                if pred in ("overlap", "intersects"):
                     hits = _safe_intersects(geom, gj, _prep=prep_geom)
-                    if not hits: 
+                    if not hits:
                         return False
-                    if pred == "intersects": 
+                    if pred == "intersects":
                         return True
-                    return (not _safe_touches(geom, gj)
-                            and not geom.contains(gj)
-                            and not geom.within(gj))
+                    return (
+                        not _safe_touches(geom, gj)
+                        and not geom.contains(gj)
+                        and not geom.within(gj)
+                    )
                 return False
 
-            # cands now a list; safe to look at first element
             if isinstance(cands[0], (int, np.integer)):
                 for j in map(int, cands):
                     if j != i and _accept(j):
@@ -392,36 +372,30 @@ def embed_polygons_handcrafted(
 
         nbr_touch = _to_indices(touch_candidates, "touches")
         nbr_inter = _to_indices(inter_candidates, "overlap")
-        nbr = list(set(nbr_touch + nbr_inter))  # union
-        
-        # Distances to union of neighbors (touch ∪ intersect)
+        nbr = list(set(nbr_touch + nbr_inter))
+
         dists_union = [centroids[i].distance(centroids[j]) for j in nbr] if nbr else []
         if dists_union:
             s = sorted(dists_union)
             n = len(s)
-            nn_median = 0.5 * (s[n//2 - 1] + s[n//2]) if n % 2 == 0 else s[n//2]
+            nn_median = 0.5 * (s[n // 2 - 1] + s[n // 2]) if n % 2 == 0 else s[n // 2]
         else:
             nn_median = 0.0
         feats["nn_dist_median"] = nn_median
 
-
-        # KNN over all others
         all_d = sorted(centroids[i].distance(centroids[j]) for j in range(len(normalized)) if j != i)
         feats["knn1"] = all_d[0] if len(all_d) >= 1 else 0.0
         feats["knn3"] = all_d[2] if len(all_d) >= 3 else (all_d[-1] if all_d else 0.0)
-        
-        # densities (same mode), then normalize by denom
+
         feats["density_r05"] = sum(
             1 for j in range(len(normalized))
-            if j != i and centroids[i].distance(centroids[j]) <= _r05
+            if j != i and centroids[i].distance(centroids[j]) <= r05
         )
         feats["density_r10"] = sum(
             1 for j in range(len(normalized))
-            if j != i and centroids[i].distance(centroids[j]) <= _r10
+            if j != i and centroids[i].distance(centroids[j]) <= r10
         )
 
-
-        # merged neighbor count → log-fraction in [0,1]
         k_any = len(nbr)
         if len(normalized) > 1:
             denom = float(len(normalized) - 1)
@@ -432,46 +406,45 @@ def embed_polygons_handcrafted(
 
         feats["density_r05"] /= denom
         feats["density_r10"] /= denom
-        
-        feats["id"] = i + 1
+
+        feats[POLY_FEATURE_ID_COL] = i + 1
 
         feats = _stabilize_polygon_feats(feats, bbox=scale_bbox)
         rows.append(feats)
 
-    # 4) DataFrame + stable column order
     df = pd.DataFrame(rows)
-    ordered = ["id"] + [c for c in _NUMERIC_ORDER if c in df.columns]
+
+    ordered = [POLY_FEATURE_ID_COL] + [c for c in POLY_FEATURE_ORDER if c in df.columns]
     extras = [c for c in df.columns if c not in ordered]
     df = df[ordered + extras]
 
-    # Optional: clip upper 0.5% per feature within this map to reduce sliver spikes
-    feat_cols = [c for c in df.columns if c != "id"]
+    # Optional: clip upper tail per feature within this map
+    feat_cols = [c for c in df.columns if c != POLY_FEATURE_ID_COL]
     if len(df) > 0 and len(feat_cols) > 0:
-        q_hi = df[feat_cols].quantile(0.995, axis=0, numeric_only=True)
+        q_hi = df[feat_cols].quantile(float(POLY_CLIP_QHI), axis=0, numeric_only=True)
         for c in feat_cols:
             hi = q_hi.get(c, None)
             if hi is not None and np.isfinite(hi):
                 df[c] = np.minimum(df[c], float(hi))
 
-    # Final safety: replace any residual NaN/Inf with Median
+    # Final safety: replace NaN/Inf with per-column median, fallback to 0
     df = df.replace([np.inf, -np.inf], np.nan)
-    feat_cols = [c for c in df.columns if c != "id"]
+    feat_cols = [c for c in df.columns if c != POLY_FEATURE_ID_COL]
     for c in feat_cols:
         med = pd.to_numeric(df[c], errors="coerce").median(skipna=True)
-        if pd.notna(med):
-            df[c] = df[c].fillna(float(med))
-        else:
-            # column is all-NaN → harmless fallback
-            df[c] = df[c].fillna(0.0)
+        df[c] = df[c].fillna(float(med) if pd.notna(med) else 0.0)
+
     return df
+
 
 # --------- Minimal CLI (optional) ----------
 def _load_geojson_polygons(path: str) -> list:
     import geopandas as gpd
     gdf = gpd.read_file(path)
     if gdf.crs is None:
-        gdf = gdf.set_crs("EPSG:4326")  # default for GeoJSON; fine since we use bbox-normalization
+        gdf = gdf.set_crs("EPSG:4326")
     return list(gdf.geometry)
+
 
 def main(argv=None):
     import argparse
@@ -484,6 +457,7 @@ def main(argv=None):
     df = embed_polygons_handcrafted(geoms)
     df.to_csv(args.output, index=False)
     print(f"Saved {len(df)} polygon embeddings to {args.output}")
+
 
 if __name__ == "__main__":
     main()
