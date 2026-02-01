@@ -1,0 +1,200 @@
+<!-- webapp/frontend/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IMGOFUP – Local Generalization Demo</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+
+  <body>
+    <div class="app">
+      <!-- Shared header (structure similar to your user study site) -->
+      <header class="site-header hero">
+        <h1 class="hero-title">
+          Map Generalization Demo<br />
+          <span class="hero-subtitle">
+            Upload GeoJSON → preview → prompt + model → generalized output
+          </span>
+        </h1>
+
+        <p class="hero-description">
+          Local prototype: you upload a GeoJSON map, preview it, then provide a
+          prompt and select a model. The system predicts the operator/parameter,
+          applies the algorithm, and returns the generalized GeoJSON plus a
+          visual output.
+        </p>
+
+        <div class="hero-info">
+          <p><strong>Input:</strong> GeoJSON FeatureCollection</p>
+          <p><strong>Output:</strong> Generalized GeoJSON + prediction</p>
+          <p><strong>Backend:</strong> FastAPI (local)</p>
+        </div>
+      </header>
+
+      <main class="site-main">
+        <!-- ===================== STEP 1: Upload GeoJSON ===================== -->
+        <section id="upload" class="screen">
+          <div class="card">
+            <h2>1) Upload GeoJSON</h2>
+
+            <label>
+              GeoJSON file
+              <input
+                id="geojsonFile"
+                type="file"
+                accept=".geojson,application/geo+json,application/json"
+              />
+            </label>
+
+            <div class="actions">
+              <button id="uploadBtn" class="primary" type="button">
+                <span id="uploadLabel">Upload</span>
+                <i id="uploadSpin" class="spinner hidden"></i>
+              </button>
+
+              <button id="clearBtn" class="ghost" type="button" disabled>
+                Clear
+              </button>
+            </div>
+
+            <p class="help subtle">
+              After uploading, a preview map will appear below.
+            </p>
+          </div>
+        </section>
+
+        <!-- ===================== STEP 2: Preview input + send request ===================== -->
+        <section id="workspace" class="screen hidden">
+          <!-- Top strip similar to user-study “trial-top” -->
+          <div class="trial-top">
+            <div class="trial-top-left">
+              <h2 class="trial-title">2) Prompt & Model</h2>
+              <p class="trial-subtitle">
+                Preview your input, enter a prompt, choose a model, then run.
+              </p>
+            </div>
+
+            <div class="trial-top-right">
+              <button id="downloadInputBtn" class="ghost" type="button">
+                Download input
+              </button>
+            </div>
+          </div>
+
+          <!-- Maps: input and output side-by-side (output appears after run) -->
+          <div class="maps">
+            <figure class="pane">
+              <figcaption>
+                <span class="badge">Input</span> Uploaded map preview
+              </figcaption>
+              <div id="mapInput" class="map"></div>
+            </figure>
+
+            <figure class="pane">
+              <figcaption>
+                <span class="badge">Output</span> Generalized map preview
+              </figcaption>
+              <div id="mapOutput" class="map map-muted"></div>
+            </figure>
+          </div>
+
+          <!-- Prompt + model selection + send -->
+          <section class="answer">
+            <label for="promptText">
+              Prompt (describe the desired generalization)
+            </label>
+
+            <div class="row">
+              <label>
+                Model
+                <select id="modelSelect" required>
+                  <option value="" selected disabled>Loading models…</option>
+                </select>
+              </label>
+
+              <label class="inline">
+                <span class="subtle">API</span>
+                <input id="apiBase" type="text" value="/api" />
+              </label>
+            </div>
+
+            <div class="answer-row">
+              <textarea
+                id="promptText"
+                placeholder="e.g., simplify outlines, remove small buildings, merge close buildings..."
+                rows="4"
+              ></textarea>
+
+              <button id="sendBtn" class="primary" type="button">
+                <span id="sendLabel">Send</span>
+                <i id="sendSpin" class="spinner hidden"></i>
+              </button>
+            </div>
+
+            <!-- Prediction summary -->
+            <div id="predictionCard" class="prediction-card hidden">
+              <h3 class="section-title">Prediction</h3>
+
+              <div class="prediction-grid">
+                <div class="prediction-item">
+                  <div class="prediction-label">Operator</div>
+                  <div id="predOperator" class="prediction-value">—</div>
+                </div>
+
+                <div class="prediction-item">
+                  <div class="prediction-label">Parameter</div>
+                  <div id="predParam" class="prediction-value">—</div>
+                </div>
+
+                <div class="prediction-item">
+                  <div class="prediction-label">Value</div>
+                  <div id="predValue" class="prediction-value">—</div>
+                </div>
+
+                <div class="prediction-item">
+                  <div class="prediction-label">Confidence</div>
+                  <div id="predConf" class="prediction-value">—</div>
+                </div>
+              </div>
+
+              <div class="actions">
+                <button
+                  id="downloadOutputBtn"
+                  class="primary"
+                  type="button"
+                  disabled
+                >
+                  Download output GeoJSON
+                </button>
+              </div>
+
+              <div id="warnings" class="warnings hidden"></div>
+            </div>
+          </section>
+        </section>
+
+        <!-- ===================== Error screen (optional) ===================== -->
+        <section id="error" class="screen hidden">
+          <div class="card center">
+            <h3>Something went wrong</h3>
+            <p id="errorMsg" class="subtle"></p>
+            <button id="errorBackBtn" class="primary" type="button">
+              Back
+            </button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+
+    <script src="script.js"></script>
+  </body>
+</html>
