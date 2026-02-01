@@ -80,4 +80,4 @@ logs/
 .mypy_cache/
 coverage/
 
-./data/input/
+./data/
