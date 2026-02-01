@@ -1,0 +1,19 @@
+{
+  "experiment": "openai_prompt_only",
+  "feature_mode": "prompt_only",
+  "class_names": [
+    "simplify",
+    "select",
+    "aggregate",
+    "displace"
+  ],
+  "best_val": {
+    "macro_f1": 0.9471691176470589,
+    "acc": 0.9473684210526315
+  },
+  "test": {
+    "macro_f1": 0.9377716877716878,
+    "acc": 0.9298245614035088
+  },
+  "model_path": "/Users/amirdonyadide/Documents/GitHub/IMGOFUP/models/exp_openai_prompt_only/classifier.joblib"
+}

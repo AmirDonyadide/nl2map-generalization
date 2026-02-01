@@ -1,0 +1,13 @@
+{
+  "id": "exp_map_only",
+  "name": "Map-only (MapVec)",
+  "description": "Predicts generalization operator and parameter using map-derived features only.",
+  "framework": "sklearn",
+  "feature_mode": "map_only",
+  "artifacts": {
+    "preprocessor": "preproc.joblib",
+    "classifier": "classifier.joblib",
+    "regressors": "cls_plus_regressors.joblib",
+    "meta": "classifier_meta.json"
+  }
+}

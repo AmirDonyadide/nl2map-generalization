@@ -15,27 +15,59 @@ from imgofup.webapp.schemas import ModelInfo
 @dataclass(frozen=True)
 class ModelHandle:
     """
-    A lightweight handle returned by `load_model(...)`.
+    Handle returned by `load_model(...)`.
 
-    For now it only stores where the model lives and its config.
-    Later you can extend this to hold:
-      - loaded sklearn pipeline
-      - torch model + tokenizer
-      - embedding configs
-      - normalization stats, etc.
+    Includes:
+      - model folder + config
+      - resolved artifact paths (validated)
     """
     model_id: str
     model_dir: Path
     config: Dict[str, Any]
+    artifacts: Dict[str, Path]
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
+_DEFAULT_ARTIFACTS = {
+    "preprocessor": "preproc.joblib",
+    "classifier": "classifier.joblib",
+    "regressors": "cls_plus_regressors.joblib",
+    "meta": "classifier_meta.json",
+    "config": "config.json",
+}
+
+
+def _safe_read_json(p: Path) -> Dict[str, Any]:
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _resolve_artifact(model_dir: Path, rel: str) -> Path:
+    p = (model_dir / rel).resolve()
+    if not p.exists():
+        raise FileNotFoundError(str(p))
+    return p
+
+
+def _normalize_model_id(model_id: str) -> str:
+    return str(model_id).strip()
+
+
+# -----------------------------
+# Public API
+# -----------------------------
 def list_models(models_dir: Path) -> List[ModelInfo]:
     """
     Discover models under: <repo>/models/<model_id>/
 
     Convention:
-      - each model has its own folder under models/
-      - optional models/<model_id>/config.json provides "name" and "description"
+      - each model is a subfolder under models/
+      - config.json provides name/description (optional but recommended)
     """
     if not models_dir.exists():
         return []
@@ -43,61 +75,93 @@ def list_models(models_dir: Path) -> List[ModelInfo]:
     items: List[ModelInfo] = []
     for model_dir in sorted([d for d in models_dir.iterdir() if d.is_dir()]):
         model_id = model_dir.name
-        cfg_path = model_dir / "config.json"
+        cfg_path = model_dir / _DEFAULT_ARTIFACTS["config"]
 
         name = model_id
         desc: Optional[str] = None
 
         if cfg_path.exists():
-            try:
-                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-                name = str(cfg.get("name", name))
-                desc = cfg.get("description", desc)
-            except Exception:
-                # Keep model listing resilient (broken config shouldn't kill the app)
-                pass
+            cfg = _safe_read_json(cfg_path)
+            name = str(cfg.get("name", name))
+            desc = cfg.get("description", desc)
 
         items.append(ModelInfo(id=model_id, name=name, description=desc))
 
     return items
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=64)
 def load_model(models_dir: Path, model_id: str) -> ModelHandle:
     """
-    Load a model by id.
+    Load a model by id and validate that the required artifacts exist.
 
-    Current behavior (safe default):
-      - validates the directory exists
-      - reads config.json if present
-      - returns a ModelHandle (cached)
+    This does NOT load joblib objects yet; inference_service loads and caches those
+    (so model_registry stays lightweight and fast).
 
-    Later:
-      - actually load weights/artifacts here (torch / sklearn / tf)
-      - store them inside ModelHandle or a separate object referenced by it
+    Required (by default):
+      - config.json (recommended; if missing, we still work with defaults)
+      - preproc.joblib
+      - cls_plus_regressors.joblib
+      - classifier_meta.json
+      - classifier.joblib (optional; bundle usually includes classifier, but we validate if present)
     """
-    model_dir = models_dir / model_id
+    model_id = _normalize_model_id(model_id)
+    model_dir = (Path(models_dir) / model_id).resolve()
+
     if not model_dir.exists():
         raise HTTPException(status_code=404, detail=f"Unknown model_id: {model_id}")
 
-    cfg_path = model_dir / "config.json"
-    config: Dict[str, Any] = {}
+    # Read config (optional)
+    cfg_path = model_dir / _DEFAULT_ARTIFACTS["config"]
+    config: Dict[str, Any] = _safe_read_json(cfg_path) if cfg_path.exists() else {}
 
-    if cfg_path.exists():
+    artifacts_cfg = config.get("artifacts", {})
+    if not isinstance(artifacts_cfg, dict):
+        artifacts_cfg = {}
+
+    # Resolve artifacts using config overrides (fallback to defaults)
+    def _name(key: str) -> str:
+        return str(artifacts_cfg.get(key, _DEFAULT_ARTIFACTS[key]))
+
+    required_keys = ["preprocessor", "regressors", "meta"]
+    optional_keys = ["classifier"]  # optional, because bundle often contains it
+
+    artifacts: Dict[str, Path] = {}
+
+    # Required
+    missing: List[str] = []
+    for key in required_keys:
+        rel = _name(key)
         try:
-            config = json.loads(cfg_path.read_text(encoding="utf-8"))
-            if not isinstance(config, dict):
-                config = {}
-        except Exception:
-            # If config is broken, keep going but store empty config.
-            config = {}
+            artifacts[key] = _resolve_artifact(model_dir, rel)
+        except FileNotFoundError:
+            missing.append(f"{key} -> {rel}")
 
-    return ModelHandle(model_id=model_id, model_dir=model_dir, config=config)
+    # Optional
+    for key in optional_keys:
+        rel = _name(key)
+        p = (model_dir / rel).resolve()
+        if p.exists():
+            artifacts[key] = p
+
+    # Always include config path if it exists (useful for debugging)
+    if cfg_path.exists():
+        artifacts["config"] = cfg_path
+
+    if missing:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Model '{model_id}' is missing required artifacts in {str(model_dir)}: "
+                + ", ".join(missing)
+            ),
+        )
+
+    return ModelHandle(model_id=model_id, model_dir=model_dir, config=config, artifacts=artifacts)
 
 
 def clear_model_cache() -> None:
     """
     Useful during development if you change files under models/<id>/.
-    You can call this from a dev-only endpoint if you want.
     """
     load_model.cache_clear()

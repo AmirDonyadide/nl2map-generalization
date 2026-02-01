@@ -1,0 +1,14 @@
+{
+  "id": "exp_openai_map",
+  "name": "Prompt + Map (OpenAI + MapVec)",
+  "description": "Combines OpenAI text embeddings with map-derived features for operator and parameter inference.",
+  "framework": "sklearn",
+  "feature_mode": "prompt_plus_map",
+  "prompt_encoder": "openai-small",
+  "artifacts": {
+    "preprocessor": "preproc.joblib",
+    "classifier": "classifier.joblib",
+    "regressors": "cls_plus_regressors.joblib",
+    "meta": "classifier_meta.json"
+  }
+}

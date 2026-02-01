@@ -1,0 +1,14 @@
+{
+  "id": "exp_use_map",
+  "name": "Prompt + Map (USE + MapVec)",
+  "description": "Combines Universal Sentence Encoder prompt embeddings with map-derived features.",
+  "framework": "sklearn",
+  "feature_mode": "prompt_plus_map",
+  "prompt_encoder": "use",
+  "artifacts": {
+    "preprocessor": "preproc.joblib",
+    "classifier": "classifier.joblib",
+    "regressors": "cls_plus_regressors.joblib",
+    "meta": "classifier_meta.json"
+  }
+}

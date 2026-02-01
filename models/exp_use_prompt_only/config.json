@@ -1,0 +1,14 @@
+{
+  "id": "exp_use_prompt_only",
+  "name": "Prompt-only (USE)",
+  "description": "Uses Universal Sentence Encoder embeddings of the user prompt to infer operator and parameter.",
+  "framework": "sklearn",
+  "feature_mode": "prompt_only",
+  "prompt_encoder": "use",
+  "artifacts": {
+    "preprocessor": "preproc.joblib",
+    "classifier": "classifier.joblib",
+    "regressors": "cls_plus_regressors.joblib",
+    "meta": "classifier_meta.json"
+  }
+}

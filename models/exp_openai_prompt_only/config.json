@@ -1,0 +1,14 @@
+{
+  "id": "exp_openai_prompt_only",
+  "name": "Prompt-only (OpenAI Embeddings)",
+  "description": "Uses OpenAI-based text embeddings of the user prompt to predict generalization operator and parameter.",
+  "framework": "sklearn",
+  "feature_mode": "prompt_only",
+  "prompt_encoder": "openai-small",
+  "artifacts": {
+    "preprocessor": "preproc.joblib",
+    "classifier": "classifier.joblib",
+    "regressors": "cls_plus_regressors.joblib",
+    "meta": "classifier_meta.json"
+  }
+}

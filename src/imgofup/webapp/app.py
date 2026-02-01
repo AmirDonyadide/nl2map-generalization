@@ -15,7 +15,10 @@ from imgofup.webapp.api import create_api_router
 # This file is: <repo>/src/imgofup/webapp/app.py
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MODELS_DIR = REPO_ROOT / "models"
-FRONTEND_DIR = REPO_ROOT / "webapp" / "frontend"  # local web UI (separate from docs)
+
+# ✅ Frontend lives inside the package:
+# <repo>/src/imgofup/webapp/frontend
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 
 # -----------------------------------------------------------------------------
 # App
@@ -26,7 +29,7 @@ app = FastAPI(
 )
 
 # CORS: allow local frontend (file://) + local dev servers.
-# If you serve frontend via FastAPI (recommended), CORS becomes mostly irrelevant.
+# If you serve frontend via FastAPI, CORS becomes mostly irrelevant.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -42,7 +45,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Optionally serve the local frontend from the backend
+# Serve the local frontend from the backend (at "/")
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
