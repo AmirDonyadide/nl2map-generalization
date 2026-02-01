@@ -1,0 +1,19 @@
+{
+  "experiment": "map_only",
+  "feature_mode": "map_only",
+  "class_names": [
+    "simplify",
+    "select",
+    "aggregate",
+    "displace"
+  ],
+  "best_val": {
+    "macro_f1": 0.3785130718954249,
+    "acc": 0.38596491228070173
+  },
+  "test": {
+    "macro_f1": 0.2572362278244631,
+    "acc": 0.2631578947368421
+  },
+  "model_path": "/Users/amirdonyadide/Documents/GitHub/IMGOFUP/models/exp_map_only/classifier.joblib"
+}

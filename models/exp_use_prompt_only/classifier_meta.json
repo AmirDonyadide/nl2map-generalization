@@ -1,0 +1,19 @@
+{
+  "experiment": "use_prompt_only",
+  "feature_mode": "prompt_only",
+  "class_names": [
+    "simplify",
+    "select",
+    "aggregate",
+    "displace"
+  ],
+  "best_val": {
+    "macro_f1": 0.9471691176470589,
+    "acc": 0.9473684210526315
+  },
+  "test": {
+    "macro_f1": 0.8762495609156373,
+    "acc": 0.8771929824561403
+  },
+  "model_path": "/Users/amirdonyadide/Documents/GitHub/IMGOFUP/models/exp_use_prompt_only/classifier.joblib"
+}

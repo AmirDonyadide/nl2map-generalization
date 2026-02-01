@@ -1,0 +1,19 @@
+{
+  "experiment": "openai_map",
+  "feature_mode": "prompt_plus_map",
+  "class_names": [
+    "simplify",
+    "select",
+    "aggregate",
+    "displace"
+  ],
+  "best_val": {
+    "macro_f1": 0.9615600858485109,
+    "acc": 0.9649122807017544
+  },
+  "test": {
+    "macro_f1": 0.8518907563025211,
+    "acc": 0.8421052631578947
+  },
+  "model_path": "/Users/amirdonyadide/Documents/GitHub/IMGOFUP/models/exp_openai_map/classifier.joblib"
+}
