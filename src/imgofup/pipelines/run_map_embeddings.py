@@ -8,7 +8,7 @@ from typing import Dict
 from imgofup.embeddings import maps as me
 from imgofup.config.constants import (
     MAP_EMBED_VERBOSITY_DEFAULT,
-    MAP_EMBED_NORM_DEFAULT,
+    POLY_NORM_MODE_DEFAULT,
     MAPS_ID_COL,
     MAP_N_POLYGONS_COL,
     MAP_EMBEDDINGS_NPZ_NAME,
@@ -50,7 +50,7 @@ def run_map_embeddings_from_config(
     exclude_removed: bool,
     out_dir: Path,
     verbosity: int = MAP_EMBED_VERBOSITY_DEFAULT,
-    norm: str = MAP_EMBED_NORM_DEFAULT,
+    norm: str = POLY_NORM_MODE_DEFAULT,
 ) -> MapEmbeddingRunMeta:
     maps_root = Path(maps_root)
     user_study_xlsx = Path(user_study_xlsx)

@@ -6,20 +6,91 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+# Import all “global knobs” from constants (single source of truth)
+from imgofup.config.constants import (
+    # core schema
+    OPERATOR_COL,
+    INTENSITY_COL,
+    MAPS_ID_COL,
+    PROMPTS_TILE_ID_COL,
+    PROMPTS_PROMPT_ID_COL,
+    PROMPTS_TEXT_COL,
+    PARAM_VALUE_COL,
+    # extents
+    EXTENT_DIAG_COL,
+    EXTENT_AREA_COL,
+    # filenames
+    PROMPT_EMBEDDINGS_NPZ_NAME,
+    PROMPTS_PARQUET_NAME,
+    MAP_EMBEDDINGS_NPZ_NAME,
+    MAPS_PARQUET_NAME,
+    TRAIN_PAIRS_SINGLE_NAME,
+    # defaults (env-overridable)
+    PROMPT_ENCODER_DEFAULT,
+    MAP_DIM_DEFAULT,
+    PROMPT_DIM_DEFAULT,
+    BATCH_SIZE_DEFAULT,
+    VAL_RATIO_DEFAULT,
+    TEST_RATIO_DEFAULT,
+    SEED_DEFAULT,
+    DISTANCE_OPS_DEFAULT,
+    AREA_OPS_DEFAULT,
+    USE_DYNAMIC_EXTENT_REFS_DEFAULT,
+    ALLOW_FALLBACK_EXTENT_DEFAULT,
+    DEFAULT_TILE_WIDTH_M_DEFAULT,
+    DEFAULT_TILE_HEIGHT_M_DEFAULT,
+    PARAM_STRATEGY_DEFAULT,
+    QUAL_TO_QUANTILE_DEFAULT,
+    QUAL_SYNONYMS_DEFAULT,
+    UNIT_ALIASES_DEFAULT,
+    DEFAULT_PARAM_BY_OPERATOR_DEFAULT,
+    # repo path policy
+    DEFAULT_DATA_DIRNAME,
+)
+
 # --------------------------- helpers ----------------------------
 
-def env_path(key: str, default: Path) -> Path:
+def env_bool(key: str, default: bool = False) -> bool:
     val = os.getenv(key)
-    return Path(val) if val else default
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
 
 def ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+
+def env_path(key: str) -> Optional[Path]:
+    """
+    Read an env var path safely:
+    - empty / unset -> None
+    - set -> expanded + resolved Path
+    Avoids the common trap Path("") == Path(".").
+    """
+    v = os.getenv(key, "").strip()
+    return Path(v).expanduser().resolve() if v else None
+
+
+def find_repo_root(start: Path) -> Path:
+    """
+    Walk upwards until we find a repo marker: src/imgofup.
+    This makes paths robust even if Jupyter sets CWD weirdly.
+    """
+    for p in [start, *start.parents]:
+        if (p / "src" / "imgofup").is_dir():
+            return p
+    return start
+
+
+DEFAULT_PROJ_ROOT: Path = find_repo_root(Path.cwd().resolve())
+
+
 def try_infer_dims(prompt_npz: Path) -> Tuple[Optional[int], Optional[int]]:
     """
     If prompt embeddings exist, infer PROMPT_DIM.
-    MAP_DIM is set elsewhere (after map embedding) — keep None here.
+    MAP_DIM is not inferred here (depends on your map embedding pipeline).
     """
     try:
         import numpy as np
@@ -32,191 +103,126 @@ def try_infer_dims(prompt_npz: Path) -> Tuple[Optional[int], Optional[int]]:
         pass
     return None, None
 
-def env_bool(key: str, default: bool = False) -> bool:
-    val = os.getenv(key)
-    if val is None:
-        return default
-    return val.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+# ======================================================
+# Operator groups (used for dynamic normalization of param_norm)
+# ======================================================
+
+DISTANCE_OPS = DISTANCE_OPS_DEFAULT
+AREA_OPS = AREA_OPS_DEFAULT
 
 
-# --------------------------- operator groups (Solution 1) ---------------------------
+# ======================================================
+# Normalization behavior (runtime override via env)
+# ======================================================
 
-# Distance-based operators (param_value in meters)
-DISTANCE_OPS = ("aggregate", "displace", "simplify")
-
-# Area-based operators (param_value in square meters)
-AREA_OPS = ("select",)
-
-
-# --------------------------- extent reference columns ---------------------------
-# These names must match what map_embeddings.py writes into maps.parquet
-# and what concat_embeddings.py merges into train_pairs.parquet.
-
-EXTENT_MINX_COL   = "extent_minx"
-EXTENT_MINY_COL   = "extent_miny"
-EXTENT_MAXX_COL   = "extent_maxx"
-EXTENT_MAXY_COL   = "extent_maxy"
-EXTENT_W_COL      = "extent_width_m"
-EXTENT_H_COL      = "extent_height_m"
-EXTENT_DIAG_COL   = "extent_diag_m"
-EXTENT_AREA_COL   = "extent_area_m2"
-EXTENT_CRS_COL    = "extent_crs"   # optional; only if you add it
+USE_DYNAMIC_EXTENT_REFS: bool = env_bool("USE_DYNAMIC_EXTENT_REFS", USE_DYNAMIC_EXTENT_REFS_DEFAULT)
+ALLOW_FALLBACK_EXTENT: bool = env_bool("ALLOW_FALLBACK_EXTENT", ALLOW_FALLBACK_EXTENT_DEFAULT)
 
 
-# --------------------------- normalization behavior ---------------------------
+# ======================================================
+# Param estimation strategy (inference-time policy)
+# ======================================================
 
-# Primary behavior: use per-map dynamic extents from GeoJSON (recommended)
-USE_DYNAMIC_EXTENT_REFS: bool = env_bool("USE_DYNAMIC_EXTENT_REFS", True)
-
-# What to do if a map has missing/degenerate extent (diag/area NaN or <=0):
-# - If True: fall back to default tile constants below
-# - If False: drop those rows (you handle drop in notebook/code)
-ALLOW_FALLBACK_EXTENT: bool = env_bool("ALLOW_FALLBACK_EXTENT", True)
-
-
-# --------------------------- param estimation strategy ---------------------------
-# Choose how to estimate param_value at inference:
-# - "mlp": your current per-operator MLPRegressor (predict param_norm -> unnormalize)
-# - "hybrid": rule-based parsing (numbers/%/small/large) + optional ML fallback
-PARAM_STRATEGY: str = os.getenv("PARAM_STRATEGY", "mlp").strip().lower()
+PARAM_STRATEGY: str = os.getenv("PARAM_STRATEGY", PARAM_STRATEGY_DEFAULT).strip().lower()
 if PARAM_STRATEGY not in {"mlp", "hybrid"}:
     raise ValueError(f"PARAM_STRATEGY must be 'mlp' or 'hybrid', got: {PARAM_STRATEGY}")
 
-
-# --------------------------- hybrid rules: qualitative -> quantile ---------------------------
-# Used when prompt has "small/medium/large" but no number.
-# You can tune these in thesis experiments.
-QUAL_TO_QUANTILE = {
-    "very_small": 0.10,
-    "small": 0.25,
-    "medium": 0.50,
-    "large": 0.75,
-    "very_large": 0.90,
-}
-
-# Words that map to the above categories (lowercased match)
-QUAL_SYNONYMS = {
-    "very_small": ["very small", "tiny", "minuscule", "very little"],
-    "small":      ["small", "smaller", "minor", "little"],
-    "medium":     ["medium", "moderate", "average", "normal"],
-    "large":      ["large", "bigger", "big", "major"],
-    "very_large": ["very large", "huge", "massive", "giant"],
-}
+QUAL_TO_QUANTILE = dict(QUAL_TO_QUANTILE_DEFAULT)
+QUAL_SYNONYMS = dict(QUAL_SYNONYMS_DEFAULT)
+UNIT_ALIASES = dict(UNIT_ALIASES_DEFAULT)
+DEFAULT_PARAM_BY_OPERATOR = dict(DEFAULT_PARAM_BY_OPERATOR_DEFAULT)
 
 
-# --------------------------- hybrid rules: unit aliases ---------------------------
-# Normalize units found in text.
-UNIT_ALIASES = {
-    # distance
-    "m":  ["m", "meter", "meters", "metre", "metres"],
-    "km": ["km", "kilometer", "kilometers", "kilometre", "kilometres"],
-    # area
-    "m2": ["m2", "m^2", "sqm", "sq m", "sq. m", "square meter", "square meters",
-           "square metre", "square metres", "meter^2", "metre^2"],
-    "km2": ["km2", "km^2", "square kilometer", "square kilometers", "square kilometre", "square kilometres"],
-    # percent
-    "%":  ["%", "percent", "percentage", "per cent"],
-}
-
-# If prompt has *no* usable number/percent/qual word, use these defaults (in original units).
-# Keep conservative so you don't explode errors.
-DEFAULT_PARAM_BY_OPERATOR = {
-    "aggregate": 5.0,   # meters (example default)
-    "displace":  5.0,   # meters
-    "simplify":  5.0,   # meters
-    "select":   50.0,   # m² (example default)
-}
-
-# --------------------------- config ----------------------------
+# ======================================================
+# Project paths (only filesystem + dataset schema overrides)
+# ======================================================
 
 @dataclass(frozen=True)
 class ProjectPaths:
-    PROJ_ROOT: Path = Path(os.getenv("PROJ_ROOT", "../")).resolve()
+    """
+    ProjectPaths controls:
+    - where inputs live (Excel, map tiles)
+    - where outputs are written (prompt/map/train/models)
+    - dataset column names (if your Excel schema differs)
+    - filtering flags (complete/remove)
 
-    # Data
-    DATA_DIR: Path = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data")
-    INPUT_DIR: Path = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "input")
-    OUTPUT_DIR: Path = (Path(os.getenv("PROJ_ROOT", "../")).resolve() / "data" / "output")
+    All values are env-overridable to make the repo portable.
+    """
+
+    # Repo root (env override wins). Otherwise auto-detected.
+    PROJ_ROOT: Path = env_path("PROJ_ROOT") or DEFAULT_PROJ_ROOT
+
+    # Data folders
+    DATA_DIR: Path = env_path("DATA_DIR") or (PROJ_ROOT / DEFAULT_DATA_DIRNAME)
+    INPUT_DIR: Path = env_path("INPUT_DIR") or (PROJ_ROOT / DEFAULT_DATA_DIRNAME / "input")
+    OUTPUT_DIR: Path = env_path("OUTPUT_DIR") or (PROJ_ROOT / DEFAULT_DATA_DIRNAME / "output")
 
     # ----------------------- Inputs (User Study Excel) -----------------------
-    USER_STUDY_XLSX: Path = (
-        Path(os.getenv("PROJ_ROOT", "../")).resolve()
-        / "data" / "userstudy" / "UserStudy.xlsx"
+    USER_STUDY_XLSX: Path = env_path("USER_STUDY_XLSX") or (
+        PROJ_ROOT / DEFAULT_DATA_DIRNAME / "userstudy" / "UserStudy.xlsx"
     )
 
+    # Excel sheet name
     RESPONSES_SHEET: str = os.getenv("RESPONSES_SHEET", "Responses")
 
-    TILE_ID_COL: str = os.getenv("TILE_ID_COL", "tile_id")
+    # Excel schema columns (env-overridable)
+    TILE_ID_COL: str = os.getenv("TILE_ID_COL", PROMPTS_TILE_ID_COL)
     COMPLETE_COL: str = os.getenv("COMPLETE_COL", "complete")
     REMOVE_COL: str = os.getenv("REMOVE_COL", "remove")
     TEXT_COL: str = os.getenv("TEXT_COL", "cleaned_text")
-    PROMPT_ID_COL: str = os.getenv("PROMPT_ID_COL", "prompt_id")
-    PARAM_VALUE_COL: str = os.getenv("PARAM_VALUE_COL", "param_value")
-    OPERATOR_COL: str = os.getenv("OPERATOR_COL", "operator")
-    INTENSITY_COL: str = os.getenv("INTENSITY_COL", "intensity")
+    PROMPT_ID_COL: str = os.getenv("PROMPT_ID_COL", PROMPTS_PROMPT_ID_COL)
 
+    # Label columns in Excel (match training schema)
+    PARAM_VALUE_COL: str = os.getenv("PARAM_VALUE_COL", PARAM_VALUE_COL)
+    OPERATOR_COL: str = os.getenv("OPERATOR_COL", OPERATOR_COL)
+    INTENSITY_COL: str = os.getenv("INTENSITY_COL", INTENSITY_COL)
+
+    # Filtering flags
     ONLY_COMPLETE: bool = env_bool("ONLY_COMPLETE", True)
     EXCLUDE_REMOVED: bool = env_bool("EXCLUDE_REMOVED", True)
 
-    PROMPT_ID_PREFIX: str = os.getenv("PROMPT_ID_PREFIX", "r")
-    PROMPT_ID_WIDTH: int = int(os.getenv("PROMPT_ID_WIDTH", "8"))
-
-    SPLIT_BY: str = os.getenv("SPLIT_BY", "tile")
-
     # ----------------------- Map inputs -----------------------
-    MAPS_ROOT: Path = (
-        Path(os.getenv("PROJ_ROOT", "../")).resolve()
-        / "data" / "input" / "samples" / "pairs"
+    MAPS_ROOT: Path = env_path("MAPS_ROOT") or (
+        PROJ_ROOT / DEFAULT_DATA_DIRNAME / "input" / "samples" / "pairs"
     )
     INPUT_MAPS_PATTERN: str = os.getenv("INPUT_MAPS_PATTERN", "*_input.geojson")
 
-    # ----------------------- Outputs -----------------------
-    PROMPT_OUT: Path = (
-        Path(os.getenv("PROJ_ROOT", "../")).resolve()
-        / "data" / "output" / "prompt_out"
+    # ----------------------- Outputs (pipelines) -----------------------
+    PROMPT_OUT: Path = env_path("PROMPT_OUT") or (
+        PROJ_ROOT / DEFAULT_DATA_DIRNAME / "output" / "prompt_out"
     )
-    MAP_OUT: Path = (
-        Path(os.getenv("PROJ_ROOT", "../")).resolve()
-        / "data" / "output" / "map_out"
+    MAP_OUT: Path = env_path("MAP_OUT") or (
+        PROJ_ROOT / DEFAULT_DATA_DIRNAME / "output" / "map_out"
     )
-    TRAIN_OUT: Path = (
-        Path(os.getenv("PROJ_ROOT", "../")).resolve()
-        / "data" / "output" / "train_out"
+    TRAIN_OUT: Path = env_path("TRAIN_OUT") or (
+        PROJ_ROOT / DEFAULT_DATA_DIRNAME / "output" / "train_out"
     )
-    MODEL_OUT: Path = (
-        Path(os.getenv("PROJ_ROOT", "../")).resolve()
-        / "data" / "output" / "models"
+    MODEL_OUT: Path = env_path("MODEL_OUT") or (
+        PROJ_ROOT / DEFAULT_DATA_DIRNAME / "output" / "models"
     )
-    SPLIT_OUT: Path = (
-        Path(os.getenv("PROJ_ROOT", "../")).resolve()
-        / "data" / "output" / "train_out" / "splits"
+    SPLIT_OUT: Path = env_path("SPLIT_OUT") or (
+        PROJ_ROOT / DEFAULT_DATA_DIRNAME / "output" / "train_out" / "splits"
     )
 
-    PRM_NPZ: Path = (
-        Path(os.getenv("PROJ_ROOT", "../")).resolve()
-        / "data" / "output" / "prompt_out" / "prompts_embeddings.npz"
-    )
+    # Canonical “single” artifacts (optional; many pipelines are experiment-scoped)
+    PRM_NPZ: Path = env_path("PRM_NPZ") or (PROMPT_OUT / PROMPT_EMBEDDINGS_NPZ_NAME)
+    PROMPTS_PARQUET: Path = env_path("PROMPTS_PARQUET") or (PROMPT_OUT / PROMPTS_PARQUET_NAME)
 
-    # NEW: useful canonical artifacts
-    MAPS_PARQUET: Path = (
-        Path(os.getenv("PROJ_ROOT", "../")).resolve()
-        / "data" / "output" / "map_out" / "maps.parquet"
-    )
-    TRAIN_PAIRS_PARQUET: Path = (
-        Path(os.getenv("PROJ_ROOT", "../")).resolve()
-        / "data" / "output" / "train_out" / "train_pairs.parquet"
-    )
+    MAPS_NPZ: Path = env_path("MAPS_NPZ") or (MAP_OUT / MAP_EMBEDDINGS_NPZ_NAME)
+    MAPS_PARQUET: Path = env_path("MAPS_PARQUET") or (MAP_OUT / MAPS_PARQUET_NAME)
+
+    TRAIN_PAIRS_PARQUET: Path = env_path("TRAIN_PAIRS_PARQUET") or (TRAIN_OUT / TRAIN_PAIRS_SINGLE_NAME)
 
     def ensure_outputs(self) -> "ProjectPaths":
-        from os import makedirs
-        makedirs(self.OUTPUT_DIR, exist_ok=True)
-        for p in (self.PROMPT_OUT, self.MAP_OUT, self.TRAIN_OUT, self.MODEL_OUT, self.SPLIT_OUT):
-            makedirs(p, exist_ok=True)
+        for p in (self.OUTPUT_DIR, self.PROMPT_OUT, self.MAP_OUT, self.TRAIN_OUT, self.MODEL_OUT, self.SPLIT_OUT):
+            ensure_dir(Path(p))
         return self
 
     def clean_outputs(self) -> None:
         import shutil
         for d in [self.PROMPT_OUT, self.MAP_OUT, self.TRAIN_OUT, self.MODEL_OUT, self.SPLIT_OUT]:
+            d = Path(d)
             if d.exists():
                 print(f"🧹 Removing old directory: {d}")
                 shutil.rmtree(d)
@@ -227,32 +233,37 @@ class ProjectPaths:
 @dataclass(frozen=True)
 class ModelConfig:
     """
-    Model hyper-parameters and prompt encoder config.
+    ModelConfig controls:
+    - embedding backend selection
+    - embedding dimensionalities
+    - batching and split defaults
+    - fallback tile scale (only used if dynamic extents are missing/degenerate)
     """
-    PROMPT_ENCODER: str = os.getenv("PROMPT_ENCODER", "openai-small")
 
-    MAP_DIM: int = int(os.getenv("MAP_DIM", "165"))
-    PROMPT_DIM: int = int(os.getenv("PROMPT_DIM", "512"))
+    PROMPT_ENCODER: str = os.getenv("PROMPT_ENCODER", PROMPT_ENCODER_DEFAULT)
+
+    MAP_DIM: int = int(os.getenv("MAP_DIM", str(MAP_DIM_DEFAULT)))
+    PROMPT_DIM: int = int(os.getenv("PROMPT_DIM", str(PROMPT_DIM_DEFAULT)))
     FUSED_DIM: int = 0
 
-    BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "512"))
+    BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", str(BATCH_SIZE_DEFAULT)))
 
-    VAL_RATIO: float = float(os.getenv("VAL_RATIO", "0.15"))
-    TEST_RATIO: float = float(os.getenv("TEST_RATIO", "0.15"))
-    SEED: int = int(os.getenv("SEED", "42"))
+    VAL_RATIO: float = float(os.getenv("VAL_RATIO", str(VAL_RATIO_DEFAULT)))
+    TEST_RATIO: float = float(os.getenv("TEST_RATIO", str(TEST_RATIO_DEFAULT)))
+    SEED: int = int(os.getenv("SEED", str(SEED_DEFAULT)))
 
     # Fallback tile scale (ONLY used if dynamic extents are missing/degenerate)
-    DEFAULT_TILE_WIDTH_M: float = float(os.getenv("DEFAULT_TILE_WIDTH_M", "400"))
-    DEFAULT_TILE_HEIGHT_M: float = float(os.getenv("DEFAULT_TILE_HEIGHT_M", "400"))
+    DEFAULT_TILE_WIDTH_M: float = float(os.getenv("DEFAULT_TILE_WIDTH_M", str(DEFAULT_TILE_WIDTH_M_DEFAULT)))
+    DEFAULT_TILE_HEIGHT_M: float = float(os.getenv("DEFAULT_TILE_HEIGHT_M", str(DEFAULT_TILE_HEIGHT_M_DEFAULT)))
 
     DEFAULT_TILE_DIAG_M: float = 0.0
     DEFAULT_TILE_AREA_M2: float = 0.0
 
     def __post_init__(self):
-        object.__setattr__(self, "FUSED_DIM", self.MAP_DIM + self.PROMPT_DIM)
+        object.__setattr__(self, "FUSED_DIM", int(self.MAP_DIM) + int(self.PROMPT_DIM))
 
-        diag = math.sqrt(self.DEFAULT_TILE_WIDTH_M**2 + self.DEFAULT_TILE_HEIGHT_M**2)
-        area = self.DEFAULT_TILE_WIDTH_M * self.DEFAULT_TILE_HEIGHT_M
+        diag = math.sqrt(float(self.DEFAULT_TILE_WIDTH_M) ** 2 + float(self.DEFAULT_TILE_HEIGHT_M) ** 2)
+        area = float(self.DEFAULT_TILE_WIDTH_M) * float(self.DEFAULT_TILE_HEIGHT_M)
         object.__setattr__(self, "DEFAULT_TILE_DIAG_M", float(diag))
         object.__setattr__(self, "DEFAULT_TILE_AREA_M2", float(area))
 
@@ -268,7 +279,7 @@ else:
     CFG = ModelConfig()
 
 
-def print_summary():
+def print_summary() -> None:
     print("=== CONFIG SUMMARY ===")
     print("PROJ_ROOT  :", PATHS.PROJ_ROOT)
     print("DATA_DIR   :", PATHS.DATA_DIR)
@@ -284,16 +295,14 @@ def print_summary():
     print("COMPLETE_COL    :", PATHS.COMPLETE_COL)
     print("REMOVE_COL      :", PATHS.REMOVE_COL)
     print("TEXT_COL        :", PATHS.TEXT_COL)
+    print("PROMPT_ID_COL   :", PATHS.PROMPT_ID_COL)
     print("PARAM_VALUE_COL :", PATHS.PARAM_VALUE_COL)
     print("OPERATOR_COL    :", PATHS.OPERATOR_COL)
     print("INTENSITY_COL   :", PATHS.INTENSITY_COL)
 
-    print("--- Filters / IDs / Split ---")
+    print("--- Filters ---")
     print("ONLY_COMPLETE   :", PATHS.ONLY_COMPLETE)
     print("EXCLUDE_REMOVED :", PATHS.EXCLUDE_REMOVED)
-    print("PROMPT_ID_COL   :", PATHS.PROMPT_ID_COL)
-    print("PROMPT_ID_RULE  :", "Read from Excel (no generation).")
-    print("SPLIT_BY        :", PATHS.SPLIT_BY)
 
     print("--- Outputs ---")
     print("PROMPT_OUT :", PATHS.PROMPT_OUT)
@@ -302,6 +311,8 @@ def print_summary():
     print("MODEL_OUT  :", PATHS.MODEL_OUT)
     print("SPLIT_OUT  :", PATHS.SPLIT_OUT)
     print("PRM_NPZ    :", PATHS.PRM_NPZ)
+    print("PROMPTS_PQ :", PATHS.PROMPTS_PARQUET)
+    print("MAPS_NPZ   :", PATHS.MAPS_NPZ)
     print("MAPS_PQ    :", PATHS.MAPS_PARQUET)
     print("PAIRS_PQ   :", PATHS.TRAIN_PAIRS_PARQUET)
 
@@ -314,28 +325,22 @@ def print_summary():
     print("VAL/TEST      :", CFG.VAL_RATIO, CFG.TEST_RATIO)
     print("SEED          :", CFG.SEED)
 
-    print("--- Normalization behavior ---")
+    print("--- Normalization ---")
     print("USE_DYNAMIC_EXTENT_REFS :", USE_DYNAMIC_EXTENT_REFS)
     print("ALLOW_FALLBACK_EXTENT   :", ALLOW_FALLBACK_EXTENT)
+    print("Extent cols             :", EXTENT_DIAG_COL, EXTENT_AREA_COL)
 
     print("--- Fallback tile scale (ONLY if dynamic refs missing) ---")
     print("DEFAULT_TILE_W/H (m) :", CFG.DEFAULT_TILE_WIDTH_M, CFG.DEFAULT_TILE_HEIGHT_M)
     print("DEFAULT_TILE_DIAG_M  :", CFG.DEFAULT_TILE_DIAG_M)
     print("DEFAULT_TILE_AREA_M2 :", CFG.DEFAULT_TILE_AREA_M2)
 
-    print("--- Extent columns ---")
-    print("EXTENT_DIAG_COL :", EXTENT_DIAG_COL)
-    print("EXTENT_AREA_COL :", EXTENT_AREA_COL)
-
-    print("--- Operator groups ---")
-    print("DISTANCE_OPS :", DISTANCE_OPS)
-    print("AREA_OPS     :", AREA_OPS)
     print("--- Operator groups ---")
     print("DISTANCE_OPS :", DISTANCE_OPS)
     print("AREA_OPS     :", AREA_OPS)
 
-    print("--- Param estimation ---")
+    print("--- Param estimation (inference policy) ---")
     print("PARAM_STRATEGY :", PARAM_STRATEGY)
-    print("QUAL_TO_QUANTILE:", QUAL_TO_QUANTILE)
-    print("DEFAULT_PARAM_BY_OPERATOR:", DEFAULT_PARAM_BY_OPERATOR)
-
+    if PARAM_STRATEGY == "hybrid":
+        print("QUAL_TO_QUANTILE:", QUAL_TO_QUANTILE)
+        print("DEFAULT_PARAM_BY_OPERATOR:", DEFAULT_PARAM_BY_OPERATOR)

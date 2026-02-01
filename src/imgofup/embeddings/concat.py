@@ -45,7 +45,7 @@ from imgofup.config.constants import (
     CONCAT_META_JSON_NAME,
     CONCAT_SAVE_BLOCKS_NAMES,
     # behavior defaults
-    CONCAT_VERBOSE_DEFAULT,
+    CONCAT_VERBOSITY_DEFAULT,
     CONCAT_FAIL_ON_MISSING_DEFAULT,
     CONCAT_DROP_DUPES_DEFAULT,
     CONCAT_L2_PROMPT_DEFAULT,
@@ -74,7 +74,7 @@ def _resolve(p: str | Path) -> Path:
     return cand if cand.exists() or cand.parent.exists() else (DATA_DIR / p).resolve()
 
 
-def setup_logging(verbosity: int = CONCAT_VERBOSE_DEFAULT) -> None:
+def setup_logging(verbosity: int = CONCAT_VERBOSITY_DEFAULT) -> None:
     level = logging.WARNING if verbosity <= 0 else (logging.INFO if verbosity == 1 else logging.DEBUG)
     logging.basicConfig(level=level, format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S")
 
@@ -141,7 +141,7 @@ def main() -> None:
     # Behavior toggles
     ap.add_argument("--fail_on_missing", action="store_true", default=CONCAT_FAIL_ON_MISSING_DEFAULT)
     ap.add_argument("--drop_dupes", action="store_true", default=CONCAT_DROP_DUPES_DEFAULT)
-    ap.add_argument("-v", "--verbose", action="count", default=CONCAT_VERBOSE_DEFAULT)
+    ap.add_argument("-v", "--verbose", action="count", default=CONCAT_VERBOSITY_DEFAULT)
 
     ap.add_argument(
         "--l2-prompt",

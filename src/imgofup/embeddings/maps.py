@@ -25,7 +25,7 @@ from imgofup.config.constants import (
     MAP_EMBED_ROOT_DEFAULT,
     MAP_EMBED_PATTERN_DEFAULT,
     MAP_EMBED_OUTDIR_DEFAULT,
-    MAP_EMBED_VERBOSE_DEFAULT,
+    MAP_EMBED_VERBOSITY_DEFAULT,
     MAP_EMBED_SAVE_CSV_DEFAULT,
     # normalization defaults
     POLY_NORM_MODE_DEFAULT,
@@ -80,7 +80,7 @@ def _resolve(p: str | Path) -> Path:
     return cand if cand.exists() or cand.parent.exists() else (DATA_DIR / p).resolve()
 
 
-def setup_logging(verbosity: int = MAP_EMBED_VERBOSE_DEFAULT) -> None:
+def setup_logging(verbosity: int = MAP_EMBED_VERBOSITY_DEFAULT) -> None:
     level = logging.WARNING if verbosity <= 0 else (logging.INFO if verbosity == 1 else logging.DEBUG)
     logging.basicConfig(
         level=level,
@@ -329,7 +329,7 @@ def main():
     ap.add_argument("--pattern", type=str, default=str(MAP_EMBED_PATTERN_DEFAULT))
     ap.add_argument("--out_dir", type=str, default=str(DATA_DIR / MAP_EMBED_OUTDIR_DEFAULT))
     ap.add_argument("--save_csv", action="store_true", default=MAP_EMBED_SAVE_CSV_DEFAULT)
-    ap.add_argument("-v", "--verbose", action="count", default=MAP_EMBED_VERBOSE_DEFAULT)
+    ap.add_argument("-v", "--verbose", action="count", default=MAP_EMBED_VERBOSITY_DEFAULT)
 
     args = ap.parse_args()
     setup_logging(int(args.verbose))

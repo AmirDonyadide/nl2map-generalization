@@ -1,128 +1,162 @@
+# src/imgofup/config/constants.py
 from __future__ import annotations
+
 from typing import Final, Literal
 
 """
-Central configuration file for the thesis repository.
+IMGOFUP — Central Constants
 
 Goal
 ----
-All user-adjustable constants live here. Other modules should only IMPORT from this file.
-Changing values here should affect the whole pipeline consistently.
+Single user-facing knob file for the whole repository.
+Changing values here should affect the entire pipeline consistently.
 
-Conventions
------------
-- *_COL constants define column names used across dataframes / parquet outputs.
-- *_NAME / *_TEMPLATE constants define file naming conventions.
-- *_DEFAULT constants define default behavior for training / preprocessing / pipelines.
+What belongs here?
+------------------
+- Dataset schema (column names)
+- Artifact filenames and naming templates
+- Feature modes and artifact lookup mappings
+- Training / preprocessing defaults and hyperparameter search spaces
+- MapVec feature extraction and embedding pipeline defaults
+- “paths.py defaults” (values that paths.py may override via environment variables)
+
+What should NOT belong here?
+----------------------------
+- Concrete filesystem paths (those live in paths.py)
+- Code logic (those live in modules)
 """
 
 # ======================================================
-# 1) Core label space (classification task)
+# 0) Fundamental numeric safety
 # ======================================================
 
-# Column name for the operator label in training dataframes.
-OPERATOR_COL = "operator"
+# Small epsilon used throughout to avoid divide-by-zero.
+EPS_POSITIVE: Final[float] = 1e-12
 
-# Optional column used for stratification / analysis (if present).
-# Used in splitting to stratify by operator × intensity when enabled.
-INTENSITY_COL = "intensity"
+# Clamp range for features that are supposed to be bounded in [0,1].
+UNIT_INTERVAL_MIN: Final[float] = 0.0
+UNIT_INTERVAL_MAX: Final[float] = 1.0
 
-# Fixed operator classes for the classifier (ORDER MATTERS!).
-# This ordering defines the integer encoding of classes across the whole project.
-FIXED_OPERATOR_CLASSES = (
+# Numerical stability for L2 normalization (used in several places).
+L2_NORM_EPS: Final[float] = 1e-12
+
+
+# ======================================================
+# 1) Dataset schema: core labels and columns
+# ======================================================
+
+# Operator label column (classification target).
+OPERATOR_COL: Final[str] = "operator"
+
+# Optional intensity column (used for stratified splitting when available).
+INTENSITY_COL: Final[str] = "intensity"
+
+# Raw parameter value column from Excel (before normalization).
+PARAM_VALUE_COL: Final[str] = "param_value"
+
+# Fixed operator classes (ORDER MATTERS: defines integer class encoding).
+FIXED_OPERATOR_CLASSES: Final[tuple[str, ...]] = (
     "simplify",
     "select",
     "aggregate",
     "displace",
 )
 
-# ======================================================
-# 2) Target definition & bundle format
-# ======================================================
+# Missing-value tokens used when cleaning IDs / string cols.
+NA_TOKENS: Final[set[str]] = {"", "nan", "none", "null"}
 
-# Name of the normalized regression target produced during training data loading.
-# If you change this, you must regenerate training data / bundles that rely on it.
-PARAM_TARGET_NAME = "param_norm"
+# ID normalization: zero-padding widths for stable keys.
+MAP_ID_WIDTH: Final[int] = 4
+PROMPT_ID_WIDTH_DEFAULT: Final[int] = 4
 
-# Version for serialized bundles produced by the training pipeline.
-# Increase if you change bundle structure in an incompatible way.
-BUNDLE_VERSION = 1
-
-# Name of the normalization scheme stored in the bundle metadata.
-# This is informational unless other code branches on it.
-NORMALIZATION_TYPE = "dynamic_extent"
 
 # ======================================================
-# 3) Missing-value & ID normalization policy
+# 2) Dataset schema: prompts artifacts (prompt embedding outputs)
 # ======================================================
 
-# Tokens treated as "missing" when cleaning ID / string columns.
-# Extend this if your Excel/CSV exports contain other missing markers (e.g., "na", "-", "n/a").
-NA_TOKENS = {"", "nan", "none", "null"}
+PROMPTS_REQUIRED_COLS: Final[list[str]] = ["tile_id", "prompt_id", "text"]
 
-# Zero-padding width for map identifiers (e.g., 1 -> "0001").
-# Must match how map tiles are keyed in your artifacts and study files.
-MAP_ID_WIDTH = 4
+PROMPTS_TILE_ID_COL: Final[str] = "tile_id"      # prompt parquet
+PROMPTS_MAP_ID_COL: Final[str] = "map_id"        # renamed downstream
+PROMPTS_PROMPT_ID_COL: Final[str] = "prompt_id"
+PROMPTS_TEXT_COL: Final[str] = "text"
 
-# Zero-padding width for prompt identifiers (e.g., 7 -> "0007").
-# Must match how prompt IDs appear in prompts.parquet and embedding IDs.
-PROMPT_ID_WIDTH_DEFAULT = 4
 
 # ======================================================
-# 4) Input schema: prompts artifacts (produced by prompt embedding pipeline)
+# 3) Dataset schema: maps artifacts (map embedding outputs)
 # ======================================================
 
-# Required columns expected in prompts.parquet produced by the prompt embedding pipeline.
-PROMPTS_REQUIRED_COLS = ["tile_id", "prompt_id", "text"]
+MAPS_ID_COL: Final[str] = "map_id"
 
-# Column names in prompts.parquet / merged training data.
-# tile_id is renamed to map_id during processing.
-PROMPTS_TILE_ID_COL = "tile_id"
-PROMPTS_MAP_ID_COL = "map_id"
-PROMPTS_PROMPT_ID_COL = "prompt_id"
-PROMPTS_TEXT_COL = "text"
+# Extent references used for dynamic normalization of param_norm.
+EXTENT_DIAG_COL: Final[str] = "extent_diag_m"
+EXTENT_AREA_COL: Final[str] = "extent_area_m2"
 
-# ======================================================
-# 5) Input schema: maps artifacts (produced by map embedding pipeline)
-# ======================================================
+MAPS_REQUIRED_EXTENT_COLS: Final[list[str]] = [EXTENT_DIAG_COL, EXTENT_AREA_COL]
 
-# Canonical map id column name used in maps.parquet and merged frames.
-MAPS_ID_COL = "map_id"
+# Traceability columns
+MAP_GEOJSON_COL: Final[str] = "geojson"
+MAP_N_POLYGONS_COL: Final[str] = "n_polygons"
 
-# Extent reference columns (must exist for dynamic normalization).
-# Used to compute PARAM_TARGET_NAME (distance ops normalized by diag, area ops by area).
-EXTENT_DIAG_COL = "extent_diag_m"
-EXTENT_AREA_COL = "extent_area_m2"
+# Extra extent columns (optional but useful)
+EXTENT_MINX_COL: Final[str] = "extent_minx"
+EXTENT_MINY_COL: Final[str] = "extent_miny"
+EXTENT_MAXX_COL: Final[str] = "extent_maxx"
+EXTENT_MAXY_COL: Final[str] = "extent_maxy"
+EXTENT_WIDTH_COL: Final[str] = "extent_width_m"
+EXTENT_HEIGHT_COL: Final[str] = "extent_height_m"
 
-# Required map extent columns for training (minimum needed).
-MAPS_REQUIRED_EXTENT_COLS = [EXTENT_DIAG_COL, EXTENT_AREA_COL]
+# Preferred extent columns to carry into train_pairs_*.parquet
+EXTENT_COLS_PREFERRED: Final[list[str]] = [
+    MAPS_ID_COL,
+    EXTENT_DIAG_COL,
+    EXTENT_AREA_COL,
+    EXTENT_WIDTH_COL,
+    EXTENT_HEIGHT_COL,
+    EXTENT_MINX_COL,
+    EXTENT_MINY_COL,
+    EXTENT_MAXX_COL,
+    EXTENT_MAXY_COL,
+]
 
-# Path column stored with each map row (for traceability/debugging).
-MAP_GEOJSON_COL = "geojson"
-
-# Optional column added during map embedding run for metadata/analysis.
-MAP_N_POLYGONS_COL = "n_polygons"
-
-# ======================================================
-# 6) Output naming conventions (concat + training artifacts)
-# ======================================================
-
-# Concat outputs (feature matrices + join table + metadata).
-# Change to enforce different naming conventions across experiments.
-CONCAT_X_NAME_TEMPLATE = "X_{exp_name}.npy"
-CONCAT_PAIRS_NAME_TEMPLATE = "train_pairs_{exp_name}.parquet"
-CONCAT_META_NAME_TEMPLATE = "meta_{exp_name}.json"
-
-# Classifier model artifact naming.
-CLS_MODEL_NAME_TEMPLATE = "clf_{exp_name}.joblib"
 
 # ======================================================
-# 7) Artifact discovery / folder conventions
+# 4) Task definition & bundle format
 # ======================================================
 
-# Folder mapping used when resolving artifacts for a given feature_mode.
-# Tuple = (folder_name, stem_used_for_files)
-FEATURE_MODE_TO_TRAIN_FOLDER = {
+# Name of the normalized regression target column created during training-data load.
+PARAM_TARGET_NAME: Final[str] = "param_norm"
+
+# Serialized bundle schema version (increment only if structure changes incompatibly).
+BUNDLE_VERSION: Final[int] = 1
+
+# Name of normalization scheme stored in bundle metadata.
+NORMALIZATION_TYPE: Final[str] = "dynamic_extent"
+
+
+# ======================================================
+# 5) Feature modes and artifact discovery
+# ======================================================
+
+FeatureMode = Literal[
+    "prompt_only",
+    "prompt_plus_map",
+    "use_map",
+    "openai_map",
+    "map_only",
+]
+
+FEATURE_MODES: Final[tuple[str, ...]] = (
+    "prompt_only",
+    "prompt_plus_map",
+    "use_map",
+    "openai_map",
+    "map_only",
+)
+
+# Feature mode -> (artifact folder, artifact stem).
+# Used by loaders to find X_*.npy and train_pairs_*.parquet without hardcoding.
+FEATURE_MODE_TO_ARTIFACTS: Final[dict[str, tuple[str, str]]] = {
     "prompt_only": ("train_out_prompt_only", "prompt_only"),
     "use_map": ("train_out_use", "use_map"),
     "map_only": ("train_out_map_only", "map_only"),
@@ -130,46 +164,62 @@ FEATURE_MODE_TO_TRAIN_FOLDER = {
     "prompt_plus_map": ("train_out", "prompt_plus_map"),
 }
 
-# Default keys used to merge labels onto pairs.
-DEFAULT_KEY_COLS = (MAPS_ID_COL, PROMPTS_PROMPT_ID_COL)
-
-# Minimum fraction of rows that must successfully receive labels after merging.
-# If you lower this, you may silently train on many unlabeled rows; if you increase it,
-# you may get errors more often when keys mismatch between Excel and parquet.
-LABEL_MERGE_MIN_HIT_RATE = 0.5
 
 # ======================================================
-# 8) Training-data loading policy
+# 6) Naming conventions: concat + models + embedding artifacts
 # ======================================================
 
-# Whether the training loader requires the "text" column to exist.
-# Set False if you want to run map-only experiments without prompt text.
-TRAIN_REQUIRE_TEXT_DEFAULT = True
+# Concat outputs (experiment-scoped):
+CONCAT_X_NAME_TEMPLATE: Final[str] = "X_{exp_name}.npy"
+CONCAT_PAIRS_NAME_TEMPLATE: Final[str] = "train_pairs_{exp_name}.parquet"
+CONCAT_META_NAME_TEMPLATE: Final[str] = "meta_{exp_name}.json"
 
-# Required join keys in train_pairs_*.parquet.
-PAIRS_REQUIRED_KEY_COLS = (PROMPTS_PROMPT_ID_COL, MAPS_ID_COL)
+# Classifier model filename:
+CLS_MODEL_NAME_TEMPLATE: Final[str] = "clf_{exp_name}.joblib"
 
-# Fallback name for prompt id column in Excel labels file if paths.PROMPT_ID_COL is not set.
-LABELS_EXCEL_PROMPT_ID_FALLBACK = "prompt_id"
+# Embedding pipeline output filenames:
+PROMPT_EMBEDDINGS_NPZ_NAME: Final[str] = "prompts_embeddings.npz"
+PROMPTS_PARQUET_NAME: Final[str] = "prompts.parquet"
 
-# ======================================================
-# 9) Weighting policy (classification training)
-# ======================================================
+MAP_EMBEDDINGS_NPZ_NAME: Final[str] = "maps_embeddings.npz"
+MAPS_PARQUET_NAME: Final[str] = "maps.parquet"
 
-# Default mode for sklearn.compute_class_weight.
-# "balanced" compensates for operator class imbalance in TRAIN.
-CLASS_WEIGHT_MODE_DEFAULT = "balanced"
-
-# Whether to apply map-level sample weighting by default.
-# If True: each map contributes ~1 total weight (1/count(map_id)).
-USE_MAP_WEIGHT_DEFAULT = True
 
 # ======================================================
-# 10) MLP classifier random search space (classification)
+# 7) Dataset preparation policies (merge, filtering)
 # ======================================================
 
-# Candidate hidden layer configurations for MLPClassifier random search.
-HIDDEN_LAYER_CANDIDATES = [
+# Default merge keys for labels onto pairs.
+DEFAULT_KEY_COLS: Final[tuple[str, str]] = (MAPS_ID_COL, PROMPTS_PROMPT_ID_COL)
+
+# Minimum fraction of rows that must receive labels after merge.
+LABEL_MERGE_MIN_HIT_RATE: Final[float] = 0.5
+
+# Whether training-data loading requires text column by default.
+TRAIN_REQUIRE_TEXT_DEFAULT: Final[bool] = True
+
+# Required keys in train_pairs_*.parquet.
+PAIRS_REQUIRED_KEY_COLS: Final[tuple[str, str]] = (PROMPTS_PROMPT_ID_COL, MAPS_ID_COL)
+
+# Fallback prompt_id column name in Excel if not configured in paths.
+LABELS_EXCEL_PROMPT_ID_FALLBACK: Final[str] = "prompt_id"
+
+
+# ======================================================
+# 8) Weighting policy (classification)
+# ======================================================
+
+CLASS_WEIGHT_MODE_DEFAULT: Final[str] = "balanced"
+
+# If True: each map contributes ~1 total weight (1 / count(map_id)).
+USE_MAP_WEIGHT_DEFAULT: Final[bool] = True
+
+
+# ======================================================
+# 9) Classifier training defaults (MLP random search)
+# ======================================================
+
+HIDDEN_LAYER_CANDIDATES: Final[list[tuple[int, ...]]] = [
     (64,),
     (128,),
     (256,),
@@ -178,36 +228,29 @@ HIDDEN_LAYER_CANDIDATES = [
     (256, 128, 64),
 ]
 
-# Candidate batch sizes for MLPClassifier random search.
-BATCH_CANDIDATES = [16, 32, 64, 128]
+BATCH_CANDIDATES: Final[list[int]] = [16, 32, 64, 128]
 
-# Defaults controlling the classifier search procedure (train_classifier.py).
-CLS_SEARCH_N_ITER_DEFAULT = 50       # number of random parameter samples to evaluate
-CLS_SEARCH_N_SPLITS_DEFAULT = 5      # number of folds for StratifiedGroupKFold
-CLS_SEARCH_SEED_DEFAULT = 42         # RNG seed for reproducibility
-CLS_SEARCH_VERBOSE_DEFAULT = True    # print progress + reports
-CLS_SEARCH_TOPK = 5                 # how many top candidates to print/save
+CLS_SEARCH_N_ITER_DEFAULT: Final[int] = 50
+CLS_SEARCH_N_SPLITS_DEFAULT: Final[int] = 5
+CLS_SEARCH_SEED_DEFAULT: Final[int] = 42
+CLS_SEARCH_VERBOSE_DEFAULT: Final[bool] = True
+CLS_SEARCH_TOPK: Final[int] = 5
+
 
 # ======================================================
-# 11) Regressor training defaults (per-operator MLPRegressor)
+# 10) Regressor training defaults (per-operator MLPRegressor)
 # ======================================================
 
-# Whether to apply log1p transform to the regression target before training.
-# Only valid if the target is non-negative.
-REG_USE_LOG1P_DEFAULT = False
+REG_USE_LOG1P_DEFAULT: Final[bool] = False
 
-# RandomizedSearchCV defaults.
-REG_N_SPLITS_DEFAULT = 5
-REG_N_ITER_DEFAULT = 40
-REG_RANDOM_STATE_DEFAULT = 42
-REG_VERBOSE_DEFAULT = 1
+REG_N_SPLITS_DEFAULT: Final[int] = 5
+REG_N_ITER_DEFAULT: Final[int] = 40
+REG_RANDOM_STATE_DEFAULT: Final[int] = 42
+REG_VERBOSE_DEFAULT: Final[int] = 1
 
-# Minimum samples per operator to train a regressor; otherwise the operator is skipped.
-REG_MIN_SAMPLES_PER_CLASS = 10
+REG_MIN_SAMPLES_PER_CLASS: Final[int] = 10
 
-# Base regressor fixed params (except random_state).
-# These define the training behavior for each operator regressor.
-REG_MLP_BASE_PARAMS = {
+REG_MLP_BASE_PARAMS: Final[dict] = {
     "activation": "relu",
     "solver": "adam",
     "learning_rate": "adaptive",
@@ -218,8 +261,7 @@ REG_MLP_BASE_PARAMS = {
     "batch_size": "auto",
 }
 
-# Hyperparameter search space for MLPRegressor (RandomizedSearchCV).
-REG_HIDDEN_LAYER_CANDIDATES = [
+REG_HIDDEN_LAYER_CANDIDATES: Final[list[tuple[int, ...]]] = [
     (64,),
     (128,),
     (256,),
@@ -227,248 +269,89 @@ REG_HIDDEN_LAYER_CANDIDATES = [
     (256, 128),
 ]
 
-# loguniform bounds (low, high) for alpha and learning_rate_init.
-REG_ALPHA_BOUNDS = (1e-6, 3e-2)
-REG_LR_INIT_BOUNDS = (1e-4, 3e-3)
+REG_ALPHA_BOUNDS: Final[tuple[float, float]] = (1e-6, 3e-2)
+REG_LR_INIT_BOUNDS: Final[tuple[float, float]] = (1e-4, 3e-3)
 
-# RandomizedSearchCV scoring and parallelism.
-REG_SCORING = "neg_root_mean_squared_error"
-REG_N_JOBS = -1  # -1 uses all cores
+REG_SCORING: Final[str] = "neg_root_mean_squared_error"
+REG_N_JOBS: Final[int] = -1
 
-# Refit settings (applied when training final regressor after selecting best params).
-REG_REFIT_MAX_ITER = 2000
-REG_REFIT_EARLY_STOPPING = False
-REG_TOL_DEFAULT = 1e-3
+REG_REFIT_MAX_ITER: Final[int] = 2000
+REG_REFIT_EARLY_STOPPING: Final[bool] = False
+REG_TOL_DEFAULT: Final[float] = 1e-3
+
 
 # ======================================================
-# 12) Preprocessing defaults (prompt/map)
+# 11) Preprocessing defaults (map/prompt)
 # ======================================================
 
-# Numerical stability for L2 normalization (prevents division by zero).
-L2_NORM_EPS = 1e-12
+# Map preprocessing:
+MAP_CLIP_Q_DEFAULT: Final[tuple[int, int]] = (5, 95)
+MAP_IMPUTE_STRATEGY_DEFAULT: Final[str] = "median"
+MAP_ROBUST_QRANGE_DEFAULT: Final[tuple[int, int]] = (5, 95)
+MAP_VAR_EPS_DEFAULT: Final[float] = 1e-12
 
-# Map preprocessing defaults:
-# - MAP_CLIP_Q_DEFAULT: percentile clipping per feature (train-derived)
-# - MAP_IMPUTE_STRATEGY_DEFAULT: SimpleImputer strategy for missing map features
-# - MAP_ROBUST_QRANGE_DEFAULT: RobustScaler quantile range
-# - MAP_VAR_EPS_DEFAULT: remove near-constant map features (std <= eps)
-MAP_CLIP_Q_DEFAULT = (5, 95)
-MAP_IMPUTE_STRATEGY_DEFAULT = "median"
-MAP_ROBUST_QRANGE_DEFAULT = (5, 95)
-MAP_VAR_EPS_DEFAULT = 1e-12
 
 # ======================================================
-# 13) Concat pipeline defaults (building X from map/prompt embeddings)
+# 12) Pipeline verbosity defaults
 # ======================================================
 
-# Logging verbosity for concat pipeline (passed to concat_embeddings.setup_logging).
-CONCAT_VERBOSITY_DEFAULT = 1
+CONCAT_VERBOSITY_DEFAULT: Final[int] = 1
+MAP_EMBED_VERBOSITY_DEFAULT: Final[int] = 1
+PROMPT_EMBED_VERBOSITY_DEFAULT: Final[int] = 1
 
-# Filenames produced by embedding pipelines (used by concat & resolution).
-PROMPT_EMBEDDINGS_NPZ_NAME = "prompts_embeddings.npz"
-PROMPTS_PARQUET_NAME = "prompts.parquet"
-MAP_EMBEDDINGS_NPZ_NAME = "maps_embeddings.npz"
-MAPS_PARQUET_NAME = "maps.parquet"
+PROMPT_EMBED_L2_NORMALIZE_DEFAULT: Final[bool] = True
+PROMPT_EMBED_SAVE_CSV_DEFAULT: Final[bool] = False
 
-# Preferred extent columns to carry forward from maps.parquet into training pairs.
-# Must include MAPS_ID_COL, EXTENT_DIAG_COL, EXTENT_AREA_COL.
-EXTENT_COLS_PREFERRED = [
-    MAPS_ID_COL,
-    EXTENT_DIAG_COL,
-    EXTENT_AREA_COL,
-    "extent_width_m",
-    "extent_height_m",
-    "extent_minx",
-    "extent_miny",
-    "extent_maxx",
-    "extent_maxy",
-]
 
 # ======================================================
-# 14) Map embedding pipeline defaults
+# 13) Dataset splitting defaults / policies
 # ======================================================
 
-# Logging verbosity for map embedding pipeline.
-MAP_EMBED_VERBOSITY_DEFAULT = 1
+SPLIT_USE_INTENSITY_FOR_STRAT_DEFAULT: Final[bool] = True
+SPLIT_SEED_DEFAULT: Final[int] = 42
+SPLIT_VAL_RATIO_DEFAULT: Final[float] = 0.15
+SPLIT_TEST_RATIO_DEFAULT: Final[float] = 0.15
+SPLIT_MAX_ATTEMPTS_DEFAULT: Final[int] = 500
+SPLIT_VERBOSE_DEFAULT: Final[bool] = True
 
-# Default normalization kind passed to map embedder (depends on your mapvec implementation).
-MAP_EMBED_NORM_DEFAULT = "extent"
+SPLIT_TINY_SINGLE_MAP_THRESHOLD: Final[int] = 2
+SPLIT_PROMPTS_PER_MAP_MULTI_THRESHOLD: Final[int] = 1
 
-# ======================================================
-# 15) Prompt embedding pipeline defaults
-# ======================================================
+SPLIT_STRAT_COL_NAME: Final[str] = "_strat"
+SPLIT_STRAT_DELIM: Final[str] = "__"
+SPLIT_SSS2_SEED_OFFSET: Final[int] = 999
+SPLIT_JSON_INDENT: Final[int] = 2
 
-# Logging verbosity for prompt embedding pipeline.
-PROMPT_EMBED_VERBOSITY_DEFAULT = 1
-
-# Whether to L2-normalize prompt embeddings (if supported by embedder).
-PROMPT_EMBED_L2_NORMALIZE_DEFAULT = True
-
-# Whether to also write CSV files alongside the binary artifacts.
-PROMPT_EMBED_SAVE_CSV_DEFAULT = False
 
 # ======================================================
-# 16) Dataset splitting defaults / policies
+# 14) MapVec — pooling: per-polygon table → one map embedding
 # ======================================================
 
-# Use operator×intensity stratification for single-prompt maps when possible.
-# If some operator×intensity groups are too rare, code falls back to operator-only.
-SPLIT_USE_INTENSITY_FOR_STRAT_DEFAULT = True
+MAP_POOL_EXCLUDE_COLS_DEFAULT: Final[tuple[str, ...]] = ("id",)
+MAP_POOL_STATS_DEFAULT: Final[tuple[str, ...]] = ("mean", "std", "min", "max")
+MAP_POOL_QUANTILES_DEFAULT: Final[tuple[float, ...]] = (0.25, 0.50, 0.75)
+MAP_POOL_ADD_GLOBALS_DEFAULT: Final[bool] = True
+MAP_POOL_QUANTILE_METHOD: Final[str] = "linear"
 
-SPLIT_SEED_DEFAULT = 42
-SPLIT_VAL_RATIO_DEFAULT = 0.15
-SPLIT_TEST_RATIO_DEFAULT = 0.15
-SPLIT_MAX_ATTEMPTS_DEFAULT = 500
-SPLIT_VERBOSE_DEFAULT = True
+POLY_CENTROID_X_COL: Final[str] = "centroid_x"
+POLY_CENTROID_Y_COL: Final[str] = "centroid_y"
+POLY_AREA_COL: Final[str] = "area"
 
-# If fewer than this many single-prompt maps exist, fallback assigns all rows to TRAIN.
-SPLIT_TINY_SINGLE_MAP_THRESHOLD = 2
-
-# Multi-prompt map threshold: a map is "multi-prompt" if prompt_count > threshold.
-# Default threshold=1 means ">=2 prompts" are multi-prompt and forced into TRAIN.
-SPLIT_PROMPTS_PER_MAP_MULTI_THRESHOLD = 1
-
-# Internal stratification label settings (column name + delimiter).
-SPLIT_STRAT_COL_NAME = "_strat"
-SPLIT_STRAT_DELIM = "__"
-
-# Seed offset used for the second shuffle split stage (train/val inside trainval).
-SPLIT_SSS2_SEED_OFFSET = 999
-
-# JSON formatting indent when saving split files.
-SPLIT_JSON_INDENT = 2
-
-# ======================================================
-# Feature modes (global experiment modes)
-# ======================================================
-# Type used throughout the repo for feature-mode values.
-FeatureMode = Literal[
-    "prompt_only",
-    "prompt_plus_map",
-    "use_map",
-    "openai_map",
-    "map_only",
-]
-
-# Allowed feature modes (runtime list).
-FEATURE_MODES: Final[tuple[str, ...]] = (
-    "prompt_only",
-    "prompt_plus_map",
-    "use_map",
-    "openai_map",
-    "map_only",
-)
-
-# Maps feature mode -> (artifact folder, artifact filename stem).
-# Used when resolving output artifacts (X_*.npy, train_pairs_*.parquet, etc.).
-FEATURE_MODE_TO_ARTIFACTS: Final[dict[str, tuple[str, str]]] = {
-    "prompt_only": ("train_out_prompt_only", "prompt_only"),
-    "use_map": ("train_out_use", "use_map"),
-    "map_only": ("train_out_map_only", "map_only"),
-    "openai_map": ("train_out_openai", "openai_map"),
-    "prompt_plus_map": ("train_out", "prompt_plus_map"),
-}
-
-# ======================================================
-# Mapvec concat script defaults / repo path policy
-# ======================================================
-
-# How many levels up from this file to reach project root
-# (concat_embeddings.py is under src/mapvec/concat/, so parents[3] reaches repo root).
-PROJECT_ROOT_MARKER_LEVELS_UP = 3
-
-# Default data folder name under repo root
-DEFAULT_DATA_DIRNAME = "data"
-
-# Default output folder name under data/
-DEFAULT_OUTPUT_DIRNAME = "output"
-
-# ======================================================
-# Mapvec concat script output filenames
-# ======================================================
-
-# Main concatenated output
-CONCAT_X_CONCAT_NAME = "X_concat.npy"
-CONCAT_TRAIN_PAIRS_NAME = "train_pairs.parquet"
-CONCAT_META_JSON_NAME = "meta.json"
-
-# Optional debug outputs (when --save-blocks is enabled)
-CONCAT_SAVE_BLOCKS_NAMES = {
-    "X_map": "X_map.npy",
-    "X_prompt": "X_prompt.npy",
-    "map_ids": "map_ids.npy",
-    "prompt_ids": "prompt_ids.npy",
-}
-
-# ======================================================
-# Mapvec concat script behavior defaults
-# ======================================================
-
-CONCAT_VERBOSE_DEFAULT = 1
-CONCAT_FAIL_ON_MISSING_DEFAULT = False
-CONCAT_DROP_DUPES_DEFAULT = False
-CONCAT_L2_PROMPT_DEFAULT = False
-CONCAT_SAVE_BLOCKS_DEFAULT = False
-
-# Numerical stability for L2-normalizing prompt embeddings inside concat script
-CONCAT_L2_EPS = 1e-12
-
-# If True, numeric-looking prompt_ids will be zero-padded to prompt_id_width in matching.
-CONCAT_PAD_NUMERIC_PROMPT_IDS_DEFAULT = False
-
-# Column name for raw parameter values from Excel / labels (before normalization).
-PARAM_VALUE_COL = "param_value"
-
-# ======================================================
-# Mapvec: pooling per-polygon features into one map embedding
-# ======================================================
-
-# Which per-polygon columns should NOT be pooled into stats.
-# Keep IDs / non-feature identifiers out of the aggregated embedding.
-MAP_POOL_EXCLUDE_COLS_DEFAULT = ("id",)
-
-# Which aggregate stats to compute per feature column.
-# Options supported by current implementation: "mean", "std", "min", "max"
-MAP_POOL_STATS_DEFAULT = ("mean", "std", "min", "max")
-
-# Robust statistics: which quantiles to include per feature column.
-# Set to () to disable quantiles entirely.
-MAP_POOL_QUANTILES_DEFAULT = (0.25, 0.50, 0.75)
-
-# Whether to append extra global scalars (polygon count, spreads, coverage).
-MAP_POOL_ADD_GLOBALS_DEFAULT = True
-
-# NumPy nanquantile method/interpolation setting.
-# "linear" is stable across versions (fallback uses interpolation=...).
-MAP_POOL_QUANTILE_METHOD = "linear"
-
-# Input column names expected in df_polys for the optional global features.
-POLY_CENTROID_X_COL = "centroid_x"
-POLY_CENTROID_Y_COL = "centroid_y"
-POLY_AREA_COL = "area"
-
-# Names of the appended global features (must match the order used in code).
-MAP_POOL_GLOBAL_FEATURE_NAMES = (
+MAP_POOL_GLOBAL_FEATURE_NAMES: Final[tuple[str, ...]] = (
     "poly_count",
     "poly_spread_w",
     "poly_spread_h",
     "coverage_ratio",
 )
 
-# Common clamps / bounded-feature policy
-UNIT_INTERVAL_MIN = 0.0
-UNIT_INTERVAL_MAX = 1.0
 
 # ======================================================
-# Mapvec: polygon feature extraction (hand-crafted)
+# 15) MapVec — polygon feature extraction (hand-crafted)
 # ======================================================
 
-# Output schema
-POLY_FEATURE_ID_COL = "id"
+POLY_FEATURE_ID_COL: Final[str] = "id"
 
-# Stable feature order for output columns (id is added separately).
-# Changing this changes the column order in the output dataframe.
-POLY_FEATURE_ORDER = (
+POLY_FEATURE_ORDER: Final[tuple[str, ...]] = (
     "area",
     "perimeter",
     "centroid_x",
@@ -494,8 +377,7 @@ POLY_FEATURE_ORDER = (
     "extent_fill",
 )
 
-# Features that are normalized by the map diagonal during stabilization.
-POLY_BY_DIAG_FEATURES = (
+POLY_BY_DIAG_FEATURES: Final[tuple[str, ...]] = (
     "perimeter",
     "eq_diameter",
     "nn_dist_median",
@@ -505,135 +387,436 @@ POLY_BY_DIAG_FEATURES = (
     "bbox_height",
 )
 
-# Normalization mode for polygon features.
-# - "extent": normalize within true map extent
-# - "fixed": normalize within a fixed W×H frame (pads if smaller)
-POLY_NORM_MODE_DEFAULT = "extent"
+POLY_NORM_MODE_DEFAULT: Final[str] = "extent"
+POLY_NORM_FIXED_WH_DEFAULT: Final[tuple[float, float]] = (400.0, 400.0)
 
-# Default fixed width/height (only used when norm_mode="fixed" and fixed_wh is None).
-POLY_NORM_FIXED_WH_DEFAULT = (400.0, 400.0)
+POLY_ECC_EPS: Final[float] = 1e-12
+POLY_ECC_MAX: Final[float] = 0.999999
 
-# Numeric stability epsilon used for widths/heights/bbox safety (avoid division by zero).
-EPS_POSITIVE = 1e-12
+POLY_DENSITY_R05_FRAC: Final[float] = 0.05
+POLY_DENSITY_R10_FRAC: Final[float] = 0.10
 
-# Eccentricity computation constants:
-# - POLY_ECC_EPS: tolerance for treating r≈1 as circular
-# - POLY_ECC_MAX: clamp max eccentricity to avoid extreme values
-POLY_ECC_EPS = 1e-12
-POLY_ECC_MAX = 0.999999
+POLY_CLIP_QHI: Final[float] = 0.995
 
-# Density radii defined as fractions of the map diagonal.
-# Changing these affects density_* features.
-POLY_DENSITY_R05_FRAC = 0.05
-POLY_DENSITY_R10_FRAC = 0.10
+SHAPELY_WARN_MODULE_PREDICATES: Final[str] = r"shapely\.predicates"
+SHAPELY_WARN_MODULE_SETOPS: Final[str] = r"shapely\.set_operations"
 
-# Optional per-map clipping of extreme feature values (upper quantile).
-# Set to 1.0 to disable clipping.
-POLY_CLIP_QHI = 0.995
-
-# Warning suppression regex modules (used to silence GEOS runtime warnings).
-SHAPELY_WARN_MODULE_PREDICATES = r"shapely\.predicates"
-SHAPELY_WARN_MODULE_SETOPS = r"shapely\.set_operations"
 
 # ======================================================
-# Mapvec: map embeddings pipeline (GeoJSON -> pooled embedding)
+# 16) MapVec — map embedding pipeline defaults (GeoJSON → pooled embedding)
 # ======================================================
 
-# Default input root relative to data/ for the CLI (map tiles folder).
-MAP_EMBED_ROOT_DEFAULT = "samples/pairs"
+MAP_EMBED_ROOT_DEFAULT: Final[str] = "samples/pairs"
+MAP_EMBED_PATTERN_DEFAULT: Final[str] = "*_input.geojson"
+MAP_EMBED_OUTDIR_DEFAULT: Final[str] = "map_out"
 
-# Default glob pattern for the input geojson within each <map_id>/ folder.
-MAP_EMBED_PATTERN_DEFAULT = "*_input.geojson"
+MAP_EMBED_SAVE_CSV_DEFAULT: Final[bool] = False
 
-# Default output directory relative to data/ for the CLI.
-MAP_EMBED_OUTDIR_DEFAULT = "map_out"
+MAP_EMBED_PROJECT_IF_GEOGRAPHIC: Final[bool] = True
+MAP_EMBED_GEOGRAPHIC_CRS_EPSG: Final[int] = 4326
+MAP_EMBED_METRIC_CRS_EPSG: Final[int] = 3857
 
-# CLI defaults
-MAP_EMBED_VERBOSE_DEFAULT = 1
-MAP_EMBED_SAVE_CSV_DEFAULT = False
+MAP_POLY_AREA_EPS: Final[float] = 1e-12
 
-# If True and CRS is geographic (lat/lon), project to a metric CRS before computing extents & polygon measures.
-MAP_EMBED_PROJECT_IF_GEOGRAPHIC = True
-MAP_EMBED_GEOGRAPHIC_CRS_EPSG = 4326
-MAP_EMBED_METRIC_CRS_EPSG = 3857
-
-# Numeric eps used to avoid divide-by-zero / degenerate widths/heights.
-# (If you already defined EPS_POSITIVE from polygon_features, reuse it globally.)
-EPS_POSITIVE = 1e-12
-
-# Drop polygons with very tiny area (slivers).
-MAP_POLY_AREA_EPS = 1e-12
-
-# Warning messages to silence (keeps logs readable on invalid geometries).
-MAP_EMBED_WARNINGS_TO_IGNORE = (
+MAP_EMBED_WARNINGS_TO_IGNORE: Final[tuple[str, ...]] = (
     "invalid value encountered in within",
     "invalid value encountered in contains",
     "invalid value encountered in buffer",
 )
 
-# Output sidecar filenames produced by map embedding pipeline.
-MAPS_CSV_NAME = "maps.csv"
-MAPS_META_JSON_NAME = "meta.json"
-MAPS_FEATURE_NAMES_JSON_NAME = "feature_names.json"
+MAPS_CSV_NAME: Final[str] = "maps.csv"
+MAPS_META_JSON_NAME: Final[str] = "meta.json"
+MAPS_FEATURE_NAMES_JSON_NAME: Final[str] = "feature_names.json"
 
-# Extent column names (used in maps.parquet)
-EXTENT_MINX_COL = "extent_minx"
-EXTENT_MINY_COL = "extent_miny"
-EXTENT_MAXX_COL = "extent_maxx"
-EXTENT_MAXY_COL = "extent_maxy"
-EXTENT_WIDTH_COL = "extent_width_m"
-EXTENT_HEIGHT_COL = "extent_height_m"
 
 # ======================================================
-# Mapvec: prompt embedding pipeline (Excel -> embeddings)
+# 17) Prompt embedding pipeline defaults (Excel → embeddings)
 # ======================================================
 
-# Environment variable to override where the data folder lives.
-MAPVEC_DATA_DIR_ENVVAR = "MAPVEC_DATA_DIR"
+PROJECT_ROOT_MARKER_LEVELS_UP: Final[int] = 3
 
-# .env file name looked up at project root
-DOTENV_FILENAME = ".env"
+DEFAULT_DATA_DIRNAME: Final[str] = "data"
+DEFAULT_OUTPUT_DIRNAME: Final[str] = "output"
 
-# Logging date format for prompt embedding script
-PROMPT_EMBED_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+MAPVEC_DATA_DIR_ENVVAR: Final[str] = "MAPVEC_DATA_DIR"
+DOTENV_FILENAME: Final[str] = ".env"
 
-# Default Excel sheet name for prompts
-PROMPTS_EXCEL_SHEET_DEFAULT = "Responses"
+PROMPT_EMBED_LOG_DATEFMT: Final[str] = "%Y-%m-%d %H:%M:%S"
 
-# Default column names in Excel user study file
-EXCEL_COMPLETE_COL_DEFAULT = "complete"
-EXCEL_REMOVE_COL_DEFAULT = "remove"
-EXCEL_TEXT_COL_DEFAULT = "cleaned_text"
+PROMPTS_EXCEL_SHEET_DEFAULT: Final[str] = "Responses"
+EXCEL_COMPLETE_COL_DEFAULT: Final[str] = "complete"
+EXCEL_REMOVE_COL_DEFAULT: Final[str] = "remove"
+EXCEL_TEXT_COL_DEFAULT: Final[str] = "cleaned_text"
+EXCEL_ONLY_COMPLETE_DEFAULT: Final[bool] = True
+EXCEL_EXCLUDE_REMOVED_DEFAULT: Final[bool] = True
 
-# Default filtering behavior for Excel rows
-EXCEL_ONLY_COMPLETE_DEFAULT = True
-EXCEL_EXCLUDE_REMOVED_DEFAULT = True
+PROMPTS_META_JSON_NAME: Final[str] = "meta.json"
+PROMPTS_EMBEDDINGS_CSV_NAME: Final[str] = "embeddings.csv"
 
-# Output sidecar filenames for prompt embedding pipeline
-PROMPTS_META_JSON_NAME = "meta.json"
-PROMPTS_EMBEDDINGS_CSV_NAME = "embeddings.csv"
+PROMPT_ENCODER_CHOICES: Final[tuple[str, ...]] = ("dan", "transformer", "openai-small", "openai-large")
 
-# Available prompt encoder backends
-PROMPT_ENCODER_CHOICES = ("dan", "transformer", "openai-small", "openai-large")
-
-# USE models: Kaggle model IDs (used by kagglehub downloader)
-USE_KAGGLE_MODEL_IDS = {
+USE_KAGGLE_MODEL_IDS: Final[dict[str, str]] = {
     "dan": "google/universal-sentence-encoder/tensorFlow2/universal-sentence-encoder/2",
     "transformer": "google/universal-sentence-encoder-large/tensorFlow2/universal-sentence-encoder-large/2",
 }
 
-# Where USE models live under data_dir (relative paths)
-USE_MODEL_DIR_DAN = "input/model_dan"
-USE_MODEL_DIR_TRANSFORMER = "input/model_transformer"
+USE_MODEL_DIR_DAN: Final[str] = "input/model_dan"
+USE_MODEL_DIR_TRANSFORMER: Final[str] = "input/model_transformer"
 
-# Default batch sizes for embedding backends
-USE_BATCH_SIZE_DEFAULT = 512
-OPENAI_BATCH_SIZE_DEFAULT = 256
+USE_BATCH_SIZE_DEFAULT: Final[int] = 512
+OPENAI_BATCH_SIZE_DEFAULT: Final[int] = 256
 
-# OpenAI embedding model names
-OPENAI_MODEL_NAME_SMALL = "text-embedding-3-small"
-OPENAI_MODEL_NAME_LARGE = "text-embedding-3-large"
+OPENAI_MODEL_NAME_SMALL: Final[str] = "text-embedding-3-small"
+OPENAI_MODEL_NAME_LARGE: Final[str] = "text-embedding-3-large"
 
-# Optional prefix added before each prompt when embedding with OpenAI.
-# This can improve task alignment for your thesis domain, but it's a knob.
-OPENAI_PROMPT_PREFIX = "Cartographic map generalization instruction: "
+OPENAI_PROMPT_PREFIX: Final[str] = "Cartographic map generalization instruction: "
+
+
+# ======================================================
+# 18) Paths.py defaults (env-overridable runtime configuration)
+# ======================================================
+
+# Default prompt encoder used by ModelConfig if not set via env/cfg.
+PROMPT_ENCODER_DEFAULT: Final[str] = "openai-small"
+
+# Default embedding dims used if not inferred from artifacts.
+MAP_DIM_DEFAULT: Final[int] = 165
+PROMPT_DIM_DEFAULT: Final[int] = 512
+
+# Default batch size for embedding calls.
+BATCH_SIZE_DEFAULT: Final[int] = 512
+
+# Default split ratios and seed (used by ModelConfig unless overridden).
+VAL_RATIO_DEFAULT: Final[float] = 0.15
+TEST_RATIO_DEFAULT: Final[float] = 0.15
+SEED_DEFAULT: Final[int] = 42
+
+# Operator groups used to normalize PARAM_TARGET_NAME.
+DISTANCE_OPS_DEFAULT: Final[tuple[str, ...]] = ("aggregate", "displace", "simplify")
+AREA_OPS_DEFAULT: Final[tuple[str, ...]] = ("select",)
+
+# Extent normalization behavior defaults (env override in paths.py).
+USE_DYNAMIC_EXTENT_REFS_DEFAULT: Final[bool] = True
+ALLOW_FALLBACK_EXTENT_DEFAULT: Final[bool] = True
+
+# Fallback tile scale used only if dynamic extents are missing.
+DEFAULT_TILE_WIDTH_M_DEFAULT: Final[float] = 400.0
+DEFAULT_TILE_HEIGHT_M_DEFAULT: Final[float] = 400.0
+
+# Param estimation strategy used at inference time.
+PARAM_STRATEGY_DEFAULT: Final[str] = "mlp"
+
+QUAL_TO_QUANTILE_DEFAULT: Final[dict[str, float]] = {
+    "very_small": 0.10,
+    "small": 0.25,
+    "medium": 0.50,
+    "large": 0.75,
+    "very_large": 0.90,
+}
+
+QUAL_SYNONYMS_DEFAULT: Final[dict[str, list[str]]] = {
+    "very_small": ["very small", "tiny", "minuscule", "very little"],
+    "small":      ["small", "smaller", "minor", "little"],
+    "medium":     ["medium", "moderate", "average", "normal"],
+    "large":      ["large", "bigger", "big", "major"],
+    "very_large": ["very large", "huge", "massive", "giant"],
+}
+
+UNIT_ALIASES_DEFAULT: Final[dict[str, list[str]]] = {
+    "m":  ["m", "meter", "meters", "metre", "metres"],
+    "km": ["km", "kilometer", "kilometers", "kilometre", "kilometres"],
+    "m2": ["m2", "m^2", "sqm", "sq m", "sq. m", "square meter", "square meters",
+           "square metre", "square metres", "meter^2", "metre^2"],
+    "km2": ["km2", "km^2", "square kilometer", "square kilometers",
+            "square kilometre", "square kilometres"],
+    "%":  ["%", "percent", "percentage", "per cent"],
+}
+
+DEFAULT_PARAM_BY_OPERATOR_DEFAULT: Final[dict[str, float]] = {
+    "aggregate": 5.0,
+    "displace":  5.0,
+    "simplify":  5.0,
+    "select":   50.0,
+}
+
+# If you use a single non-experiment train_pairs output, this is the default filename.
+TRAIN_PAIRS_SINGLE_NAME: Final[str] = "train_pairs.parquet"
+
+
+# ======================================================
+# 19) Legacy concat CLI script (optional)
+# ======================================================
+# Keep only if you still use the old mapvec/concat CLI.
+
+CONCAT_X_CONCAT_NAME: Final[str] = "X_concat.npy"
+CONCAT_TRAIN_PAIRS_NAME: Final[str] = "train_pairs.parquet"
+CONCAT_META_JSON_NAME: Final[str] = "meta.json"
+
+CONCAT_SAVE_BLOCKS_NAMES: Final[dict[str, str]] = {
+    "X_map": "X_map.npy",
+    "X_prompt": "X_prompt.npy",
+    "map_ids": "map_ids.npy",
+    "prompt_ids": "prompt_ids.npy",
+}
+
+CONCAT_FAIL_ON_MISSING_DEFAULT: Final[bool] = False
+CONCAT_DROP_DUPES_DEFAULT: Final[bool] = False
+CONCAT_L2_PROMPT_DEFAULT: Final[bool] = False
+CONCAT_SAVE_BLOCKS_DEFAULT: Final[bool] = False
+CONCAT_L2_EPS: Final[float] = 1e-12
+CONCAT_PAD_NUMERIC_PROMPT_IDS_DEFAULT: Final[bool] = False
+
+
+# ======================================================
+# 20) Backwards compatibility aliases (temporary)
+# ======================================================
+# Some older modules might still import FEATURE_MODE_TO_TRAIN_FOLDER.
+# Keep this alias until you update all imports, then remove it.
+FEATURE_MODE_TO_TRAIN_FOLDER = FEATURE_MODE_TO_ARTIFACTS
+
+# ======================================================
+# 21) User-study sample generation (OSM → tile pairs)
+# ======================================================
+# These constants control the *dataset creation* notebook / scripts that:
+#   - read a .osm.pbf extract
+#   - create a tile grid
+#   - pick the densest tiles (TOP_K)
+#   - apply one generalization operator (aggregate/simplify/displace/select)
+#   - render input/target PNGs
+#   - write per-tile metadata (operator, intensity, param_value, etc.)
+#
+# IMPORTANT:
+# - These are NOT used during model training/inference directly.
+# - They exist so you can reproduce the user-study dataset generation exactly.
+
+# ----------------------
+# 21.1 Rendering defaults
+# ----------------------
+
+# DPI used for rendered PNG frames in the user-study dataset.
+USERSTUDY_RENDER_DPI_DEFAULT: Final[int] = 300
+
+# Figure size (in inches) used for rendering.
+# Together with TILE_SIZE_M, this determines meters-per-pixel.
+USERSTUDY_RENDER_FIG_INCH_DEFAULT: Final[float] = 6.0
+
+# Whether to draw a tile frame / boundary (if your renderer supports it).
+USERSTUDY_DRAW_TILE_FRAME_DEFAULT: Final[bool] = True
+
+# Whether to include road layer in the rendered PNGs.
+# Keep False if the user study is building-only to reduce visual clutter.
+USERSTUDY_SHOW_ROADS_DEFAULT: Final[bool] = False
+
+# Visual styling (matplotlib / geopandas plotting)
+USERSTUDY_ROAD_COLOR_DEFAULT: Final[str] = "black"
+USERSTUDY_BUILDING_FACE_DEFAULT: Final[str] = "gray"
+USERSTUDY_BUILDING_EDGE_DEFAULT: Final[str] = "white"
+
+
+# ----------------------
+# 21.2 Spatial defaults
+# ----------------------
+
+# CRS used for user-study tile creation (must be metric; meters).
+# Example: EPSG:25832 for Germany UTM 32N.
+USERSTUDY_TARGET_CRS_DEFAULT: Final[str] = "EPSG:25832"
+
+# Tile size in meters (width == height).
+# This is the *ground truth* scale used during dataset generation.
+USERSTUDY_TILE_SIZE_M_DEFAULT: Final[int] = 400
+
+# When selecting tiles from a grid, keep only the TOP_K tiles by building count.
+# This is a dataset-size knob (affects how many samples you create).
+USERSTUDY_TOPK_TILES_DEFAULT: Final[int] = 824
+
+# Random seed used for:
+# - shuffling tile ids
+# - balancing assignment to operator/intensity
+# - any stochastic operator behavior (if you use random anywhere)
+USERSTUDY_SEED_DEFAULT: Final[int] = 42
+
+
+# ----------------------
+# 21.3 OSM feature filters (optional roads)
+# ----------------------
+# Only relevant if USERSTUDY_SHOW_ROADS_DEFAULT=True.
+
+# OSM road classes considered "important" for display.
+# You can extend or shrink this set depending on what you want participants to see.
+USERSTUDY_IMPORTANT_ROADS_DEFAULT: Final[set[str]] = {
+    "motorway", "trunk", "primary", "secondary", "tertiary",
+    "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link",
+    "residential", "unclassified",
+}
+
+# Stroke width per OSM highway class when rendering (matplotlib linewidth units).
+USERSTUDY_ROAD_WIDTH_MAP_DEFAULT: Final[dict[str, float]] = {
+    "motorway": 2.0, "trunk": 1.8, "primary": 1.6,
+    "secondary": 1.4, "tertiary": 1.2,
+    "residential": 0.8, "unclassified": 0.8,
+    "motorway_link": 1.4, "trunk_link": 1.3,
+    "primary_link": 1.2, "secondary_link": 1.1, "tertiary_link": 1.0,
+}
+
+
+# ----------------------
+# 21.4 Operator / intensity design
+# ----------------------
+
+# Operators used in the user study generation.
+# These must align with FIXED_OPERATOR_CLASSES (same spelling) if you train on them.
+USERSTUDY_OPERATORS_DEFAULT: Final[tuple[str, ...]] = (
+    "aggregate",
+    "simplify",
+    "displace",
+    "select",
+)
+
+# Intensity levels for the user study.
+USERSTUDY_INTENSITIES_DEFAULT: Final[tuple[str, ...]] = (
+    "low",
+    "medium",
+    "high",
+)
+
+# Target effects per operator/intensity
+# These targets are used by your parameter-search helpers to pick a param_value
+# that produces roughly the intended amount of change.
+#
+# Interpretation:
+# - select: fraction of polygons removed (by area threshold)
+# - aggregate: fraction of polygons merged (count reduction proxy)
+# - simplify: fraction of polygons that changed “visibly” (area-change heuristic)
+# - displace: fraction of polygons moved beyond a distance tolerance
+USERSTUDY_SELECT_REMOVAL_TARGET_DEFAULT: Final[dict[str, float]] = {
+    "low": 0.30,
+    "medium": 0.50,
+    "high": 0.70,
+}
+
+USERSTUDY_AGG_MERGE_TARGET_DEFAULT: Final[dict[str, float]] = {
+    "low": 0.30,
+    "medium": 0.50,
+    "high": 0.70,
+}
+
+USERSTUDY_SIMPLIFY_CHANGE_TARGET_DEFAULT: Final[dict[str, float]] = {
+    "low": 0.30,
+    "medium": 0.50,
+    "high": 0.70,
+}
+
+USERSTUDY_DISPLACE_CHANGE_TARGET_DEFAULT: Final[dict[str, float]] = {
+    "low": 0.30,
+    "medium": 0.50,
+    "high": 0.70,
+}
+
+
+# ----------------------
+# 21.5 Parameter-search / heuristic tuning
+# ----------------------
+# These constants control the internal search loops that choose a per-tile
+# param_value that best matches the targets above.
+
+# Number of steps in the grid search when choosing aggregate parameter per tile.
+USERSTUDY_AGG_PARAM_SEARCH_STEPS_DEFAULT: Final[int] = 8
+
+# Number of steps in the grid search when choosing simplify parameter per tile.
+USERSTUDY_SIMPLIFY_PARAM_SEARCH_STEPS_DEFAULT: Final[int] = 6
+
+# Number of steps in the grid search when choosing displace parameter per tile.
+USERSTUDY_DISPLACE_PARAM_SEARCH_STEPS_DEFAULT: Final[int] = 6
+
+# Simplify “changed” heuristic threshold:
+# A polygon is counted as "changed" if relative area difference exceeds this value.
+USERSTUDY_SIMPLIFY_AREA_REL_TOL_DEFAULT: Final[float] = 0.01
+
+# Displace “changed” heuristic threshold (meters):
+# A polygon is counted as moved if centroid displacement > move_tol.
+USERSTUDY_DISPLACE_MOVE_TOL_M_DEFAULT: Final[float] = 0.30
+
+# Displace operator solver defaults (these affect how strong the displacement is).
+USERSTUDY_DISPLACE_ITERS_DEFAULT: Final[int] = 15
+USERSTUDY_DISPLACE_STEP_DEFAULT: Final[float] = 0.60
+USERSTUDY_DISPLACE_MAX_TOTAL_DEFAULT: Final[float] = 10.0
+
+# Aggregate operator buffering defaults:
+# join_style=2 (mitre), cap_style=2 (flat), resolution=1 are "angular" defaults.
+USERSTUDY_AGG_JOIN_STYLE_DEFAULT: Final[int] = 2
+USERSTUDY_AGG_CAP_STYLE_DEFAULT: Final[int] = 2
+USERSTUDY_AGG_MITRE_LIMIT_DEFAULT: Final[float] = 5.0
+USERSTUDY_AGG_BUFFER_RESOLUTION_DEFAULT: Final[int] = 1
+
+
+# ----------------------
+# 21.6 Derived helper defaults
+# ----------------------
+
+# When simplifying before rendering, you compute a tolerance based on pixel size:
+# meters_per_pixel = TILE_SIZE_M / (FIG_INCH * DPI)
+# and then use something like meters_per_pixel * factor.
+#
+# This factor controls how aggressively you simplify for rendering speed/clarity.
+USERSTUDY_RENDER_TOL_FACTOR_DEFAULT: Final[float] = 0.75
+
+# ======================================================
+# User study — tiling & sampling defaults
+# ======================================================
+
+# Column name used to identify tiles throughout user-study generation
+# This column is added during tiling and used consistently in metadata,
+# GeoJSONs, and downstream notebooks.
+USERSTUDY_TILE_ID_COL_DEFAULT: Final[str] = "tile_id"
+
+# ============================================================
+# User Study — sample generation & rendering defaults
+# ============================================================
+
+
+
+# these already exist elsewhere in your repo, but we re-export conceptually
+# OPERATOR_COL = "operator"
+# INTENSITY_COL = "intensity"
+# PARAM_VALUE_COL = "param_value"
+
+# ---- sampling / balancing ----
+USERSTUDY_TOP_K_TILES_DEFAULT = 800
+
+
+# ---- output locations (relative to repo root / data) ----
+USERSTUDY_SAMPLES_DIR_DEFAULT = "data/input/samples/pairs"
+USERSTUDY_METADATA_DIR_DEFAULT = "data/input/samples/metadata"
+
+# ---- metadata filenames ----
+USERSTUDY_META_CSV_NAME_DEFAULT = "meta.csv"
+USERSTUDY_META_XLSX_NAME_DEFAULT = "meta.xlsx"
+
+# ---- per-sample file naming ----
+USERSTUDY_INPUT_GEOJSON_SUFFIX_DEFAULT = "_input.geojson"
+USERSTUDY_TARGET_GEOJSON_SUFFIX_DEFAULT = "_generalized.geojson"
+
+USERSTUDY_INPUT_PNG_PREFIX_DEFAULT = "input_"
+USERSTUDY_TARGET_PNG_PREFIX_DEFAULT = "generalized_"
+
+# ---- rendering defaults ----
+USERSTUDY_RENDER_PNG_DEFAULT = True
+
+# ---- map normalization ----
+USERSTUDY_RENDER_TARGET_SIZE_M = 400.0
+
+# ==================================================
+# User-study (sample generation) defaults
+# ==================================================
+
+USERSTUDY_PBF_PATH_DEFAULT = "../data/input/koeln-regbez-250927.osm.pbf"
+USERSTUDY_BBOX_DEFAULT = [7.00, 50.65, 7.20, 50.82]
+
+USERSTUDY_TOP_K_TILES_DEFAULT = 824
+
+
+USERSTUDY_SAMPLES_DIR_DEFAULT = "../data/input/samples/pairs_new"
+USERSTUDY_METADATA_DIR_DEFAULT = "../data/input/samples/metadata_new"
+
+USERSTUDY_META_CSV_NAME_DEFAULT = "meta.csv"
+USERSTUDY_META_XLSX_NAME_DEFAULT = "meta.xlsx"
