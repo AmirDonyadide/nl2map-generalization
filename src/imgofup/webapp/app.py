@@ -45,13 +45,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the local frontend from the backend (at "/")
-if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
-
 # Include API routes (defined in api.py)
 app.include_router(create_api_router(MODELS_DIR))
 
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
 # -----------------------------------------------------------------------------
 # Local run
