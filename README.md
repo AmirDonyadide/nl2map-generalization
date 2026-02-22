@@ -1,140 +1,256 @@
 # Inferring Map Generalisation Operations from User Prompts
 
-## Overview
+Master’s Thesis  
+MSc Geoinformatics Engineering  
+Politecnico di Milano (2025–2026)  
+In collaboration with the University of Bonn  
 
-This repository contains the implementation accompanying the Master's thesis:
+Author: Amirhossein Donyadidegan  
 
-Inferring Map Generalisation Operations from User Prompts  
-Politecnico di Milano, 2025–2026
+---
 
-The project proposes a hybrid workflow that links natural-language user prompts to classical cartographic generalisation algorithms. Instead of directly generating new geometries, the system predicts structured decision variables, namely the generalisation operator and its corresponding parameter, which are then executed using deterministic geometric methods.
+## Abstract
 
-This design ensures interpretability, reproducibility, and consistency with established cartographic principles.
+Cartographic map generalisation enables spatial data to be adapted to different visualisation scales and purposes. Classical generalisation algorithms such as selection, simplification, aggregation, and displacement have been extensively developed and refined over decades. However, their practical application requires expert knowledge for selecting the appropriate operator and tuning its parameters.
+
+This project proposes a hybrid machine learning workflow that infers generalisation operators and parameter values from natural-language user prompts combined with input map data. Instead of replacing deterministic geometric algorithms, the system predicts structured decision variables (operator + parameter) which are subsequently executed using established cartographic methods.
+
+The approach combines interpretability, reproducibility, and the robustness of classical generalisation with the flexibility of multimodal learning.
+
+---
+
+## Research Motivation
+
+Recent work in AI-based cartography attempts to learn full geometry transformations end-to-end. While powerful, such approaches:
+
+- Require large training datasets
+- Lack interpretability
+- Discard decades of cartographic algorithmic research
+
+This thesis explores an alternative paradigm:
+
+> Learn *which* algorithm to apply and *how* to parameterise it —  
+> not how to regenerate geometry from scratch.
+
+This preserves:
+
+- Algorithmic transparency  
+- Deterministic execution  
+- Reproducibility  
+- Scientific interpretability  
+
+---
+
+## Problem Formulation
+
+Given:
+
+- A vector map tile (building footprints)
+- A natural-language user prompt
+
+Predict:
+
+1. The appropriate generalisation operator  
+2. The corresponding parameter value  
+
+Then execute the deterministic geometric operator to generate the final output.
+
+This is formulated as a **multimodal structured prediction task** consisting of:
+
+- Multi-class classification (operator)
+- Operator-specific regression (parameter)
 
 ---
 
 ## Methodological Framework
 
-The system follows a multimodal learning pipeline composed of the following stages:
+The system follows a modular pipeline:
 
-### Input
-- Vector map tiles (building footprints)
-- Natural-language user prompts
+### 1. Input
+- Polygonal building map tiles
+- Free-form natural-language prompts
 
-### Embedding
-- Geometric features extracted from map tiles (handcrafted descriptors)
-- Semantic embeddings derived from textual prompts
+### 2. Representation
 
-### Fusion
-- Concatenation of geometric and textual representations into a joint feature vector
+#### Geometric Embedding
+Handcrafted spatial descriptors extracted from vector data, including:
+- Feature counts
+- Area statistics
+- Density measures
+- Compactness indicators
+- Spatial proximity metrics
 
-### Prediction
+#### Textual Embedding
+Semantic sentence embeddings derived from:
+- Pre-trained sentence encoders
+- Transformer-based models
+
+### 3. Fusion
+Concatenation of geometric and textual representations into a joint feature vector.
+
+### 4. Prediction
 - Operator classification (multi-class)
-- Parameter regression (operator-specific)
+- Parameter regression (continuous)
 
-### Execution
-- Application of deterministic geometric algorithms to generate the generalised output
+### 5. Execution
+Application of deterministic geometric algorithms implemented with:
+
+- GeoPandas
+- Shapely
 
 ---
 
 ## Supported Generalisation Operators
 
-The system focuses on four classical operators:
+The system currently supports four classical operators:
 
-- Selection: removal of less relevant features
-- Simplification: reduction of geometric detail
-- Aggregation: merging of nearby features
-- Displacement: spatial adjustment to resolve conflicts
+- **Selection** – removal of less relevant features
+- **Simplification** – reduction of geometric detail
+- **Aggregation** – merging of nearby features
+- **Displacement** – spatial adjustment to resolve conflicts
+
+Each operator is parameterised and executed deterministically.
 
 ---
 
 ## Dataset
 
-A dedicated dataset was constructed through a controlled user study. Participants were asked to describe transformations between input and generalised maps in natural language.
+A dedicated dataset was constructed through a controlled user study.
 
-Each sample includes:
-- A map tile
-- A user prompt
-- A labelled operator
-- A corresponding parameter value
+Participants were shown:
+- An input building map
+- A generalised output
 
-This enables supervised learning for both classification and regression tasks.
+They were asked to describe, in natural language, how the transformation could be achieved.
+
+Each sample contains:
+
+- Map tile geometry
+- User prompt
+- Labelled operator
+- Corresponding parameter value
+
+This enables supervised learning for:
+
+- Operator classification
+- Parameter regression
 
 ---
 
-## Experimental Setup
+## Experimental Design
 
 Three experimental configurations are evaluated:
 
-- Prompt-only: using textual embeddings
-- Geometry-only: using spatial features
-- Multimodal: combining both representations
+### 1. Prompt-Only
+Uses textual embeddings exclusively.
 
-Results indicate that operator classification is primarily driven by textual input, while parameter estimation benefits significantly from geometric context.
+### 2. Geometry-Only
+Uses handcrafted spatial descriptors exclusively.
+
+### 3. Multimodal
+Combines both representations.
+
+### Key Findings
+
+- Operator selection is primarily driven by textual semantics.
+- Parameter estimation benefits significantly from geometric context.
+- Multimodal models outperform unimodal baselines.
 
 ---
 
 ## Repository Structure
 
-Typical project structure:
-
+```
 .
-├── data/
+├── data/                # Dataset and processed tiles
 ├── src/
-│   ├── embeddings/
-│   ├── models/
-│   ├── pipeline/
-│   ├── generalisation/
-├── app/
-├── notebooks/
-├── results/
+│   ├── embeddings/      # Text and geometry embedding modules
+│   ├── features/        # Geometric feature extraction
+│   ├── models/          # MLP architectures and training logic
+│   ├── pipeline/        # Training and inference scripts
+│   ├── generalisation/  # Deterministic operator implementations
+│   └── utils/
+├── app/                 # FastAPI web prototype
+├── notebooks/           # Exploratory analysis
+├── results/             # Experimental outputs
 ├── requirements.txt
 └── README.md
+```
 
 ---
 
 ## Installation
 
-Clone the repository and install dependencies:
+Clone the repository:
 
+```bash
 git clone https://github.com/AmirDonyadide/nl2map-generalization
 cd nl2map-generalization
+```
+
+Create environment and install dependencies:
+
+```bash
 pip install -r requirements.txt
+```
 
 ---
 
 ## Usage
 
-Train the model:
+### Train the model
 
+```bash
 python src/pipeline/train.py
+```
 
-Run inference:
+### Run inference
 
+```bash
 python src/pipeline/inference.py
+```
 
-Run the web application:
+### Launch the web application
 
+```bash
 uvicorn app.main:app --reload
+```
+
+Then open:
+
+```
+http://127.0.0.1:8000
+```
 
 ---
 
-## Technologies
+## Web Application Prototype
 
-- Python
-- GeoPandas, Shapely
-- scikit-learn / PyTorch
-- FastAPI
-- Sentence embedding models
+An interactive FastAPI-based prototype demonstrates:
+
+- Upload of GeoJSON building datasets
+- Free-text prompt input
+- Model selection
+- Operator and parameter prediction
+- Visualisation of generalised output
+
+The prototype illustrates the practical applicability of the trained models for non-expert users.
 
 ---
 
-## Contributions
+## Reproducibility
 
-- Construction of a prompt–geometry dataset
-- Formulation of map generalisation as a structured prediction task
-- Development of a multimodal learning pipeline
-- Integration into an interactive prototype system
+This repository includes:
+
+- Full training pipeline
+- Feature extraction code
+- Model definitions
+- Experimental configurations
+- Web inference pipeline
+
+All deterministic geometric operators are implemented explicitly and do not rely on black-box transformations.
+
+Random seeds can be fixed for reproducibility.
 
 ---
 
@@ -142,27 +258,46 @@ uvicorn app.main:app --reload
 
 - Assumes a single dominant operator per sample
 - Limited to polygonal building data
-- Uses simple feature concatenation for fusion
+- Simple feature concatenation used for multimodal fusion
+- Dataset size constrained by user study scope
 
 ---
 
 ## Future Work
 
-- Extension to multi-operator workflows
-- Advanced multimodal fusion strategies
-- Larger and more diverse datasets
-- Integration into GIS platforms
+- Multi-operator sequential workflows
+- Graph-based map embeddings
+- Advanced multimodal fusion (attention-based methods)
+- Integration into GIS software
+- Larger-scale user studies
+- LLM-based prompt interpretation comparison
+
+---
+
+## Technologies
+
+- Python
+- GeoPandas
+- Shapely
+- scikit-learn
+- PyTorch
+- FastAPI
+- Sentence-transformer models
 
 ---
 
 ## Citation
 
+If you use this repository in academic work, please cite:
+
+```
 @mastersthesis{donyadidegan2026nl2map,
-  title={Inferring Map Generalisation Operations from User Prompts},
-  author={Donyadidegan, Amirhossein},
-  year={2026},
-  school={Politecnico di Milano}
+  title     = {Inferring Map Generalisation Operations from User Prompts},
+  author    = {Donyadidegan, Amirhossein},
+  year      = {2026},
+  school    = {Politecnico di Milano}
 }
+```
 
 ---
 
@@ -170,4 +305,13 @@ uvicorn app.main:app --reload
 
 Amirhossein Donyadidegan  
 MSc Geoinformatics Engineering  
-Politecnico di Milano
+Politecnico di Milano  
+
+GitHub: https://github.com/AmirDonyadide  
+LinkedIn: (optional)
+
+---
+
+## License
+
+Specify your preferred license here (e.g., MIT, GPL-3.0, Apache-2.0).
