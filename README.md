@@ -11,11 +11,15 @@ Author: Amirhossein Donyadidegan
 
 ## Abstract
 
-Cartographic map generalisation enables spatial data to be adapted to different visualisation scales and purposes. Classical generalisation algorithms such as selection, simplification, aggregation, and displacement have been extensively developed and refined over decades. However, their practical application requires expert knowledge for selecting the appropriate operator and tuning its parameters.
+Cartographic map generalisation enables spatial data to be adapted to different visualisation scales and purposes; however, the effective use of many generalisation algorithms requires expert knowledge, particularly for operator selection and parameter tuning, making the process difficult and unintuitive for non-expert users.
 
-This project proposes a hybrid machine learning workflow that infers generalisation operators and parameter values from natural-language user prompts combined with input map data. Instead of replacing deterministic geometric algorithms, the system predicts structured decision variables (operator + parameter) which are subsequently executed using established cartographic methods.
+This thesis proposes a supervised machine learning workflow that links natural-language user prompts to established geometric generalisation algorithms. Rather than replacing established methods, the approach combines their interpretability and robustness with the flexibility of multimodal learning.
 
-The approach combines interpretability, reproducibility, and the robustness of classical generalisation with the flexibility of multimodal learning.
+A dedicated dataset is constructed through a controlled user study in which participants describe, in natural language, how pairs of input and generalised building maps are related. Each sample is annotated with a generalisation operator and its parameter value, enabling supervised learning for both operator classification and parameter regression.
+
+The multimodal input combines semantic embeddings of user prompts with handcrafted geometric descriptors extracted from map tiles. Different embedding strategies are evaluated, and a multi-layer perceptron(MLP) architecture is employed to predict operator type and parameter magnitude. Experiments compare prompt-only, geometry-only, and multimodal configurations.
+
+Results indicate that operator selection can be reliably inferred from natural-language prompts, while accurate parameter estimation benefits from incorporating geometric context. A prototype web application further demonstrates the integration of the proposed models into an interactive, prompt-driven generalisation workflow for non-expert users.
 
 ---
 
