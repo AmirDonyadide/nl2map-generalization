@@ -299,7 +299,8 @@ If you use this repository in academic work, please cite:
   title     = {Inferring Map Generalisation Operations from User Prompts},
   author    = {Donyadidegan, Amirhossein},
   year      = {2026},
-  school    = {Politecnico di Milano}
+  school    = {Politecnico di Milano},
+  url       = {https://github.com/AmirDonyadide/nl2map-generalization}
 }
 ```
 
