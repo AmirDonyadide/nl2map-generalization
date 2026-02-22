@@ -1,6 +1,3 @@
-
-# `src/` — Core Implementation
-
 This directory contains the complete implementation of the nl2map-generalization pipeline, including:
 
 - Dataset preparation
@@ -291,3 +288,4 @@ Inferring Map Generalisation Operations from User Prompts
 Amirhossein Donyadidegan  
 MSc Geoinformatics Engineering  
 Politecnico di Milano
+
