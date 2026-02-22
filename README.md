@@ -307,9 +307,8 @@ Amirhossein Donyadidegan
 MSc Geoinformatics Engineering  
 Politecnico di Milano  
 
-GitHub: https://github.com/AmirDonyadide  
-LinkedIn: (optional)
-
+GitHub: github.com/AmirDonyadide  
+LinkedIn: linkedin.com/in/amirhossein-donyadidegan
 ---
 
 ## License
