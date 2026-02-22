@@ -60,6 +60,7 @@ This design avoids maintaining a dedicated server while still supporting concurr
 ---
 
 ## Repository Contents (docs/)
+```
 docs/
 ├── images/
 │ └── pairs/ # map pair stimuli (input/output PNGs)
@@ -67,6 +68,7 @@ docs/
 ├── script.js # client-side logic + API calls
 ├── style.css # styling
 └── README.md # (this file)
+```
 
 ---
 
