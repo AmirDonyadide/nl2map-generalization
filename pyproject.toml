@@ -1,6 +1,6 @@
 [project]
-name = "imgofup"
-version = "0.2.0"
+name = "nl2map-generalization"
+version = "1.0.0"
 requires-python = ">=3.10"
 dependencies = [
   "geopandas",
