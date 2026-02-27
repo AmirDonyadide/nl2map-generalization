@@ -1,4 +1,4 @@
-# Inferring Map Generalization Operations from User Prompts
+# Inferring Map Generalisation Operations from User Prompts
 
 Master’s Thesis · MSc Geoinformatics Engineering  
 Politecnico di Milano (2025–2026), in collaboration with the University of Bonn  
@@ -10,7 +10,7 @@ Author: Amirhossein Donyadidegan
 
 This repository investigates a practical question in AI-assisted cartography:
 
-> Can we infer **which deterministic map generalization operator** to apply (and with what parameter) from a **natural-language prompt**?
+> Can we infer **which deterministic map generalisation operator** to apply (and with what parameter) from a **natural-language prompt**?
 
 Instead of learning geometry transformations end-to-end, this project predicts:
 
@@ -39,7 +39,7 @@ Core package: `imgofup` (in `src/`).
 
 ---
 
-## Supported generalization operators
+## Supported generalisation operators
 
 The current system predicts and applies four operators:
 
@@ -48,7 +48,7 @@ The current system predicts and applies four operators:
 - **Aggregation**
 - **Displacement**
 
-Each operator is parameterized and executed with deterministic geometric logic.
+Each operator is parameterised and executed with deterministic geometric logic.
 
 ---
 
@@ -63,7 +63,7 @@ Each operator is parameterized and executed with deterministic geometric logic.
 │   ├── features/        # handcrafted polygon/map descriptors
 │   ├── models/          # classifier/regressor training + bundle save
 │   ├── pipelines/       # end-to-end experiment scripts
-│   ├── preprocessing/   # cleaning and normalization utilities
+│   ├── preprocessing/   # cleaning and normalisation utilities
 │   ├── userstudy/       # sample generation and prompt cleaning tools
 │   └── webapp/          # FastAPI API + static frontend
 ├── models/              # trained model bundles
